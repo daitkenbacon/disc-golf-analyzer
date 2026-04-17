@@ -1,0 +1,121 @@
+{% extends "base.html" %}
+{% block title %}Analyze {{ clip_name }} · Disc Golf Analyzer{% endblock %}
+
+{% block content %}
+<section class="stack">
+  <div>
+    <h1>Analyze <span class="mono">{{ clip_name }}</span></h1>
+    <p class="muted">
+      Pick one or both pipelines. cv2 is fast and focused on tempo + plant;
+      pose adds joint-angle metrics (reach-back depth, hip lead, spine lean).
+    </p>
+  </div>
+
+  <form id="analyze-form" class="card stack">
+    <div>
+      <h2>Pipelines</h2>
+      <div class="stack">
+        <label class="row" style="align-items: flex-start; gap: 8px;">
+          <input type="checkbox" name="pipeline" value="cv2" checked />
+          <span>
+            <strong>cv2</strong> <span class="dim">— silhouette + motion, no joint angles.</span>
+            {% if 'cv2' in existing_pipelines %}<span class="tag ok">already analyzed</span>{% endif %}
+          </span>
+        </label>
+        <label class="row" style="align-items: flex-start; gap: 8px;">
+          <input type="checkbox" name="pipeline" value="pose" />
+          <span>
+            <strong>pose</strong> <span class="dim">— MediaPipe landmarks, joint angles + kinematic metrics. Slower.</span>
+            {% if 'pose' in existing_pipelines %}<span class="tag ok">already analyzed</span>{% endif %}
+          </span>
+        </label>
+      </div>
+    </div>
+
+    <div>
+      <h2>Notes <span class="dim">(optional)</span></h2>
+      <input id="notes" name="notes" type="text"
+             placeholder="e.g. warmup throw, different drive shoes, stiff disc…" />
+      <div class="dim" style="margin-top: 4px;">Logged to history.jsonl for trend tracking.</div>
+    </div>
+
+    <div class="row space-between">
+      <a href="{{ url_for('landing') }}" class="btn ghost">← Back</a>
+      <button type="submit" id="btn-run" class="btn primary">Run pipeline</button>
+    </div>
+  </form>
+
+  <div class="card" id="log-card" hidden>
+    <h2>Pipeline output</h2>
+    <pre id="log" class="log"></pre>
+    <div class="row space-between" style="margin-top: 10px;">
+      <div id="run-status" class="muted">Running…</div>
+      <a id="btn-view" class="btn primary" style="display:none;">View results</a>
+    </div>
+  </div>
+</section>
+
+<script>
+(function () {
+  const form = document.getElementById("analyze-form");
+  const btn = document.getElementById("btn-run");
+  const logCard = document.getElementById("log-card");
+  const logEl = document.getElementById("log");
+  const statusEl = document.getElementById("run-status");
+  const viewBtn = document.getElementById("btn-view");
+
+  const clipName = {{ clip_name | tojson }};
+
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+
+    const checked = Array.from(form.querySelectorAll('input[name="pipeline"]:checked'));
+    if (!checked.length) {
+      alert("Pick at least one pipeline.");
+      return;
+    }
+    const pipelines = checked.map((c) => c.value);
+    const notes = document.getElementById("notes").value.trim();
+
+    btn.disabled = true;
+    btn.textContent = "Running…";
+    logCard.hidden = false;
+    logEl.textContent = "";
+    statusEl.textContent = "Running — MediaPipe init can take ~5 s on first run.";
+    statusEl.style.color = "var(--text-dim)";
+    viewBtn.style.display = "none";
+
+    let sawError = false;
+
+    try {
+      await DGA.streamPost("/api/analyze",
+        { clip: clipName, pipelines, notes, overrides: {} },
+        (line) => {
+          logEl.textContent += line + "\n";
+          logEl.scrollTop = logEl.scrollHeight;
+          if (/\[error\]/.test(line)) sawError = true;
+        }
+      );
+
+      if (sawError) {
+        statusEl.textContent = "Finished with errors — see log.";
+        statusEl.style.color = "var(--err)";
+      } else {
+        statusEl.textContent = "Done.";
+        statusEl.style.color = "var(--ok)";
+        viewBtn.href = `/results/${encodeURIComponent(clipName)}`;
+        viewBtn.textContent = "View results";
+        viewBtn.style.display = "inline-block";
+      }
+    } catch (err) {
+      logEl.textContent += `\n[client error] ${err.message}\n`;
+      statusEl.textContent = "Connection failed — see log.";
+      statusEl.style.color = "var(--err)";
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Run pipeline";
+    }
+  });
+})();
+</script>
+{% endblock %}

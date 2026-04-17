@@ -3,8 +3,11 @@ opencv-python>=4.9.0
 numpy>=1.26.0
 PyYAML>=6.0.1
 
-# Only required for the WIP pose pipeline (analyze_throw.py).
-# Safe to comment out if you only use the cv2 pipeline — MediaPipe installs can
-# be flaky on some platforms / networks.
+# Pose pipeline (analyze_throw.py) — MediaPipe installs can be flaky on some
+# platforms / networks. Safe to comment out if you only use the cv2 pipeline.
 mediapipe>=0.10.14
 scipy>=1.12.0
+
+# Local web UI (scripts/serve.py). Only needed if you want the browser-based
+# wizard — the CLI pipelines and coaching flows work without it.
+flask>=3.0

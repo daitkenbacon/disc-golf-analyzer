@@ -1,0 +1,186 @@
+{% extends "base.html" %}
+{% block title %}Set up your profile · Disc Golf Analyzer{% endblock %}
+
+{% block content %}
+<section class="wizard-step">
+  <div class="wizard-progress">
+    {% for _ in range(6) %}
+    <div class="dot" data-step-dot="{{ loop.index0 }}"></div>
+    {% endfor %}
+  </div>
+
+  <h1>Set up your profile</h1>
+  <p class="muted">
+    The coach reads this on every session. It calibrates thresholds and cues to
+    your level and distance range — pro tempo targets are not your targets.
+  </p>
+
+  <form id="setup-form" class="card stack" autocomplete="off">
+    <div data-step="0">
+      <label for="name">What should we call you?</label>
+      <input id="name" name="name" type="text" required
+             value="{{ existing.player.name if existing.player and existing.player.name not in (None, 'YOUR_NAME') else '' }}"
+             placeholder="Daniel" />
+    </div>
+
+    <div data-step="1" hidden>
+      <label for="handedness">Throwing hand</label>
+      <select id="handedness" name="handedness">
+        <option value="right" {% if (existing.player or {}).handedness == 'right' %}selected{% endif %}>Right</option>
+        <option value="left"  {% if (existing.player or {}).handedness == 'left'  %}selected{% endif %}>Left</option>
+        <option value="auto"  {% if (existing.player or {}).handedness == 'auto'  %}selected{% endif %}>Auto-detect from clip</option>
+      </select>
+    </div>
+
+    <div data-step="2" hidden>
+      <label>Current distance range (feet)</label>
+      <div class="row">
+        <input id="drive_min" name="drive_min" type="number" min="50" max="800" step="5"
+               value="{{ (existing.player.typical_drive_ft[0] if existing.player and existing.player.typical_drive_ft else 250) }}" />
+        <span class="muted">to</span>
+        <input id="drive_max" name="drive_max" type="number" min="50" max="800" step="5"
+               value="{{ (existing.player.typical_drive_ft[1] if existing.player and existing.player.typical_drive_ft else 325) }}" />
+      </div>
+      <div class="dim" style="margin-top: 6px;">
+        Your honest consistent range, not one best throw.
+      </div>
+    </div>
+
+    <div data-step="3" hidden>
+      <label for="level">Level</label>
+      <select id="level" name="level">
+        <option value="brand_new"    {% if (existing.player or {}).level == 'brand_new' %}selected{% endif %}>Brand new (&lt;6 months)</option>
+        <option value="recreational" {% if not (existing.player or {}).level or (existing.player or {}).level == 'recreational' %}selected{% endif %}>Recreational</option>
+        <option value="intermediate" {% if (existing.player or {}).level == 'intermediate' %}selected{% endif %}>Intermediate</option>
+        <option value="advanced"     {% if (existing.player or {}).level == 'advanced' %}selected{% endif %}>Advanced</option>
+      </select>
+      <div class="dim" style="margin-top: 6px;">
+        Sets the threshold bands the coach compares you against.
+      </div>
+    </div>
+
+    <div data-step="4" hidden>
+      <label>Known issues (check any you're aware of — the coach starts here)</label>
+      <div id="issues" class="stack">
+        {% set existing_issues = (existing.player.known_issues if existing.player and existing.player.known_issues else []) %}
+        {% for tag, desc in [
+          ('rounding', 'Arm arcs out around the body on the pull'),
+          ('early_shoulders', 'Shoulders fire before hips in the kinetic chain'),
+          ('weak_plant', 'Plant foot drifts or settles late'),
+          ('shallow_reach_back', 'Arm does not extend far enough behind'),
+          ('late_hit', 'Disc stays behind the body too long'),
+          ('poor_snap', 'Wrist snap weak at release'),
+        ] %}
+        <label class="row" style="align-items: flex-start; gap: 8px;">
+          <input type="checkbox" name="known_issues" value="{{ tag }}" {% if tag in existing_issues %}checked{% endif %} />
+          <span><strong>{{ tag }}</strong> <span class="dim">— {{ desc }}</span></span>
+        </label>
+        {% endfor %}
+      </div>
+    </div>
+
+    <div data-step="5" hidden>
+      <label for="goal">One distance / consistency goal for the next month (optional)</label>
+      <input id="goal" name="goal" type="text"
+             placeholder="Unlock 350+ feet consistently"
+             value="{{ (existing.player.goals[0] if existing.player and existing.player.goals else '') }}" />
+    </div>
+
+    <div class="row space-between" style="margin-top: 20px;">
+      <button type="button" id="btn-back" class="btn ghost">Back</button>
+      <div class="row">
+        <button type="button" id="btn-next" class="btn primary">Next</button>
+        <button type="submit" id="btn-save" class="btn primary" hidden>Save profile</button>
+      </div>
+    </div>
+
+    <div id="setup-error" style="color: var(--err); display: none;"></div>
+  </form>
+</section>
+
+<script>
+(function () {
+  const form = document.getElementById("setup-form");
+  const steps = Array.from(form.querySelectorAll("[data-step]"));
+  const dots = Array.from(document.querySelectorAll("[data-step-dot]"));
+  const btnBack = document.getElementById("btn-back");
+  const btnNext = document.getElementById("btn-next");
+  const btnSave = document.getElementById("btn-save");
+  const errEl = document.getElementById("setup-error");
+  let idx = 0;
+
+  function render() {
+    steps.forEach((s, i) => (s.hidden = i !== idx));
+    dots.forEach((d, i) => d.classList.toggle("active", i <= idx));
+    btnBack.hidden = idx === 0;
+    btnNext.hidden = idx === steps.length - 1;
+    btnSave.hidden = idx !== steps.length - 1;
+    const focusable = steps[idx].querySelector("input, select, textarea");
+    if (focusable) focusable.focus();
+  }
+
+  function validateCurrent() {
+    errEl.style.display = "none";
+    const stepEl = steps[idx];
+    const required = stepEl.querySelector("[required]");
+    if (required && !required.value.trim()) {
+      errEl.textContent = "Required field.";
+      errEl.style.display = "block";
+      return false;
+    }
+    if (idx === 2) {
+      const min = parseInt(document.getElementById("drive_min").value, 10);
+      const max = parseInt(document.getElementById("drive_max").value, 10);
+      if (!(min > 0 && max > 0 && max >= min)) {
+        errEl.textContent = "Distance range needs a valid low and high.";
+        errEl.style.display = "block";
+        return false;
+      }
+    }
+    return true;
+  }
+
+  btnBack.addEventListener("click", () => {
+    if (idx > 0) { idx -= 1; render(); }
+  });
+  btnNext.addEventListener("click", () => {
+    if (!validateCurrent()) return;
+    if (idx < steps.length - 1) { idx += 1; render(); }
+  });
+
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    if (!validateCurrent()) return;
+
+    const payload = {
+      player: {
+        name: document.getElementById("name").value.trim(),
+        handedness: document.getElementById("handedness").value,
+        level: document.getElementById("level").value,
+        typical_drive_ft: [
+          parseInt(document.getElementById("drive_min").value, 10),
+          parseInt(document.getElementById("drive_max").value, 10),
+        ],
+        known_issues: Array.from(
+          form.querySelectorAll('input[name="known_issues"]:checked')
+        ).map((i) => i.value),
+        goals: document.getElementById("goal").value.trim()
+          ? [document.getElementById("goal").value.trim()]
+          : [],
+        throw_style: "backhand",
+      },
+    };
+
+    try {
+      await DGA.postJSON("/api/config", payload);
+      window.location.href = "/";
+    } catch (err) {
+      errEl.textContent = "Save failed: " + err.message;
+      errEl.style.display = "block";
+    }
+  });
+
+  render();
+})();
+</script>
+{% endblock %}

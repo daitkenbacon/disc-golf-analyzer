@@ -1,0 +1,195 @@
+{% extends "base.html" %}
+{% block title %}Results · {{ clip_name }} · Disc Golf Analyzer{% endblock %}
+
+{% block content %}
+<section class="stack">
+  <div class="row space-between">
+    <div>
+      <h1>Results <span class="mono">{{ clip_name }}</span></h1>
+      <p class="muted" style="margin: 4px 0 0;">
+        Traffic-light colors compare your numbers against recreational-level
+        bands, calibrated to your profile. Hover a cell for the raw value.
+      </p>
+    </div>
+    <div class="row">
+      <a href="{{ url_for('analyze_page', clip=clip_name) }}" class="btn">Re-analyze</a>
+      <a href="{{ url_for('override_page', clip=clip_name) }}" class="btn">Events look wrong?</a>
+    </div>
+  </div>
+
+  {% if available | length > 1 %}
+  <div class="tabs" role="tablist" id="pipeline-tabs">
+    {% for p in available %}
+    <div class="tab {% if loop.first %}active{% endif %}" role="tab" data-tab="{{ p }}">
+      {{ p }}
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  {% for p in available %}
+  {% set metrics = metrics_by_pipeline[p] %}
+  {% set events = (metrics or {}).get('events', {}) %}
+  {% set fps = (metrics or {}).get('fps', 30) %}
+  {% set rows = rows_by_pipeline[p] %}
+  {% set keyframes = keyframes_by_pipeline[p] %}
+  {% set video_file = clip_stem ~ ('.cv.mp4' if p == 'cv2' else '.pose.mp4') %}
+
+  <div class="tab-panel {% if loop.first %}active{% endif %}" data-panel="{{ p }}">
+    <div class="card">
+      <h2 style="text-transform: uppercase; letter-spacing: 0.04em; font-size: 13px; color: var(--text-dim);">
+        {{ p }} pipeline
+      </h2>
+
+      <video
+        class="analyzer-video"
+        controls
+        preload="metadata"
+        data-fps="{{ fps }}"
+        data-pipeline="{{ p }}"
+      >
+        <source src="{{ url_for('serve_annotated', filename=video_file) }}" type="video/mp4" />
+        Your browser can't play this file. Open it directly at
+        <a href="{{ url_for('serve_annotated', filename=video_file) }}">{{ video_file }}</a>.
+      </video>
+
+      {% set event_order = ['setup', 'plant', 'reach_back', 'power_pocket', 'hit', 'release'] %}
+      {% set any_event = namespace(found=false) %}
+      {% for ev in event_order %}{% if events.get(ev ~ '_idx') is not none %}{% set any_event.found = true %}{% endif %}{% endfor %}
+      {% if any_event.found %}
+      <div class="row" style="gap: 8px; margin-top: 10px;">
+        <span class="dim">Jump to:</span>
+        {% for ev in event_order %}
+          {% set frame = events.get(ev ~ '_idx') %}
+          {% if frame is not none %}
+          <button
+            type="button"
+            class="btn"
+            data-seek-frame="{{ frame }}"
+            data-pipeline="{{ p }}"
+            style="padding: 4px 10px; font-size: 13px;"
+          >
+            {{ ev.replace('_', ' ') }} <span class="dim mono">@{{ frame }}</span>
+          </button>
+          {% endif %}
+        {% endfor %}
+      </div>
+      {% endif %}
+    </div>
+
+    <div class="card">
+      <div class="row space-between" style="margin-bottom: 10px;">
+        <h2 style="margin: 0;">Metrics</h2>
+        <button
+          type="button"
+          class="btn"
+          data-copy-metrics="{{ p }}"
+        >Copy metrics JSON</button>
+      </div>
+
+      {% if not rows %}
+      <p class="muted">No metrics recorded for this pipeline.</p>
+      {% else %}
+      <table class="metrics">
+        <thead>
+          <tr>
+            <th style="width: 60%;">Metric</th>
+            <th>Value</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in rows %}
+          <tr>
+            <td>{{ row.label }}</td>
+            <td class="value {{ row.status }}" title="{{ row.key }}">{{ row.value }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% endif %}
+    </div>
+
+    {% if keyframes %}
+    <div class="card">
+      <h2>Event keyframes</h2>
+      <div class="keyframes">
+        {% for kf in keyframes %}
+        <figure style="margin: 0;">
+          <a href="{{ kf.src }}" target="_blank" rel="noopener">
+            <img src="{{ kf.src }}" alt="{{ kf.event }}" loading="lazy" />
+          </a>
+          <figcaption>{{ kf.event.replace('_', ' ') }}</figcaption>
+        </figure>
+        {% endfor %}
+      </div>
+    </div>
+    {% endif %}
+  </div>
+  {% endfor %}
+
+  <div class="card">
+    <h2>Share with an AI coach</h2>
+    <p class="muted" style="margin-bottom: 10px;">
+      Paste the JSON below into Claude / ChatGPT / any AI coach along with a
+      short ask like <em>"coach me on my backhand based on these metrics"</em>.
+      Your clip stays on your machine — only the numbers go out.
+    </p>
+    <details>
+      <summary class="muted" style="cursor: pointer;">Show raw metrics JSON</summary>
+      <pre class="log" id="raw-metrics">{{ metrics_by_pipeline | tojson(indent=2) }}</pre>
+    </details>
+  </div>
+</section>
+
+<script>
+(function () {
+  // ---- Wire tabs ----
+  const tabsRoot = document.getElementById("pipeline-tabs");
+  if (tabsRoot) {
+    DGA.wireTabs(document);
+  }
+
+  // ---- Wire event chapter buttons: seek the matching pipeline's video ----
+  document.querySelectorAll("[data-seek-frame]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const pipeline = btn.dataset.pipeline;
+      const frame = parseInt(btn.dataset.seekFrame, 10);
+      const video = document.querySelector(
+        `video.analyzer-video[data-pipeline="${pipeline}"]`
+      );
+      if (!video) return;
+      const fps = parseFloat(video.dataset.fps) || 30;
+      video.currentTime = DGA.frameToTime(frame, fps);
+      video.pause();
+    });
+  });
+
+  // ---- Copy-metrics-JSON buttons ----
+  const allMetrics = {{ metrics_by_pipeline | tojson }};
+  document.querySelectorAll("[data-copy-metrics]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const p = btn.dataset.copyMetrics;
+      const payload = allMetrics[p] || {};
+      const text = JSON.stringify(payload, null, 2);
+      try {
+        await navigator.clipboard.writeText(text);
+        const orig = btn.textContent;
+        btn.textContent = "Copied ✓";
+        setTimeout(() => { btn.textContent = orig; }, 1400);
+      } catch (err) {
+        // Fallback: select the raw pre so user can copy manually.
+        const pre = document.getElementById("raw-metrics");
+        if (pre) {
+          const r = document.createRange();
+          r.selectNodeContents(pre);
+          const sel = window.getSelection();
+          sel.removeAllRanges();
+          sel.addRange(r);
+        }
+        btn.textContent = "Select manually ↓";
+      }
+    });
+  });
+})();
+</script>
+{% endblock %}

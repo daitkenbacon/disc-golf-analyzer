@@ -1,0 +1,158 @@
+{% extends "base.html" %}
+{% block title %}Your clips · Disc Golf Analyzer{% endblock %}
+
+{% block content %}
+<section class="stack">
+  <div>
+    <h1>Your clips</h1>
+    <p class="muted">
+      Drop a side-view backhand clip below and we'll run the pipeline, compute
+      tempo and plant metrics, and hand you an annotated overlay video you can
+      scrub through. You can then show the results to an AI coach for feedback.
+    </p>
+  </div>
+
+  {% if not config_exists %}
+  <div class="card" style="border-color: rgba(245,158,11,0.4);">
+    <div class="row space-between">
+      <div>
+        <h2 style="color: var(--warn); margin-bottom: 4px;">Set up your profile first</h2>
+        <p class="muted" style="margin: 0;">
+          The coach calibrates feedback to your level, distance range, and known
+          issues. Takes about two minutes.
+        </p>
+      </div>
+      <a href="{{ url_for('setup') }}" class="btn primary">Start setup</a>
+    </div>
+  </div>
+  {% endif %}
+
+  <div class="card">
+    <h2>Add a clip</h2>
+    <p class="muted">
+      Side-on, whole body in frame, 30 fps or better. MOV / MP4 / M4V / AVI / MKV.
+    </p>
+    <div id="dropzone" class="dropzone">
+      <div id="dropzone-prompt">
+        <strong>Drop a clip here</strong>
+        <div class="dim" style="margin-top: 6px;">
+          or <a href="#" id="pickfile">choose a file</a>
+        </div>
+      </div>
+      <div id="dropzone-status" style="display:none;"></div>
+      <input
+        id="fileinput"
+        type="file"
+        accept="video/*,.mov,.mp4,.m4v,.avi,.mkv"
+        style="display:none;"
+      />
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>
+      Clips in <code class="mono">clips/</code>
+      <span class="dim" style="font-weight: normal;">
+        ({{ clips | length }})
+      </span>
+    </h2>
+
+    {% if not clips %}
+    <p class="muted">No clips yet. Drop one above to get started.</p>
+    {% else %}
+    <div>
+      {% for clip in clips %}
+      <div class="clip-row">
+        <div>
+          <div class="name">{{ clip.name }}</div>
+          <div class="dim">
+            {{ clip.size_mb }} MB
+            {% for p in clip.analyzed_pipelines %}
+              <span class="tag ok">{{ p }} analyzed</span>
+            {% endfor %}
+            {% if not clip.analyzed_pipelines %}
+              <span class="tag">not yet analyzed</span>
+            {% endif %}
+          </div>
+        </div>
+        <div class="actions">
+          {% if clip.analyzed_pipelines %}
+          <a href="{{ url_for('results_page', clip=clip.name) }}" class="btn">View results</a>
+          {% endif %}
+          <a href="{{ url_for('analyze_page', clip=clip.name) }}" class="btn primary">
+            {% if clip.analyzed_pipelines %}Re-analyze{% else %}Analyze{% endif %}
+          </a>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+    {% endif %}
+  </div>
+</section>
+
+<script>
+(function () {
+  const dz = document.getElementById("dropzone");
+  const prompt = document.getElementById("dropzone-prompt");
+  const status = document.getElementById("dropzone-status");
+  const input = document.getElementById("fileinput");
+  const picker = document.getElementById("pickfile");
+
+  function setStatus(html) {
+    prompt.style.display = "none";
+    status.style.display = "block";
+    status.innerHTML = html;
+  }
+  function resetStatus() {
+    prompt.style.display = "block";
+    status.style.display = "none";
+    status.innerHTML = "";
+  }
+
+  picker.addEventListener("click", (e) => { e.preventDefault(); input.click(); });
+  dz.addEventListener("click", () => input.click());
+
+  ["dragenter", "dragover"].forEach((ev) =>
+    dz.addEventListener(ev, (e) => {
+      e.preventDefault();
+      dz.classList.add("dragover");
+    })
+  );
+  ["dragleave", "drop"].forEach((ev) =>
+    dz.addEventListener(ev, (e) => {
+      e.preventDefault();
+      dz.classList.remove("dragover");
+    })
+  );
+
+  dz.addEventListener("drop", (e) => {
+    if (e.dataTransfer.files.length) upload(e.dataTransfer.files[0]);
+  });
+  input.addEventListener("change", () => {
+    if (input.files.length) upload(input.files[0]);
+  });
+
+  async function upload(file) {
+    dz.classList.add("uploading");
+    setStatus(`<strong>Uploading ${DGA.escape(file.name)}…</strong>`);
+    const fd = new FormData();
+    fd.append("file", file);
+    try {
+      const res = await fetch("/api/upload", { method: "POST", body: fd });
+      const data = await res.json();
+      if (!res.ok || !data.ok) {
+        throw new Error(data.description || data.error || `HTTP ${res.status}`);
+      }
+      setStatus(
+        `<strong>Uploaded.</strong> <a href="${data.analyze_url}" class="btn primary" style="margin-left: 8px;">Analyze ${DGA.escape(data.clip)}</a>`
+      );
+      // Reload the clips list shortly, preserving the banner for a beat.
+      setTimeout(() => window.location.reload(), 1200);
+    } catch (err) {
+      setStatus(`<span style="color: var(--err);"><strong>Upload failed:</strong> ${DGA.escape(err.message)}</span>`);
+      dz.classList.remove("uploading");
+    }
+  }
+})();
+</script>
+{% endblock %}

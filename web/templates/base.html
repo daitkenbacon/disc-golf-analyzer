@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{% block title %}Disc Golf Analyzer{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}" />
+  {% block head %}{% endblock %}
+</head>
+<body>
+  <header class="app-header">
+    <a href="{{ url_for('landing') }}" class="brand">
+      <span class="brand-mark">◎</span> Disc Golf Analyzer
+    </a>
+    <nav>
+      <a href="{{ url_for('landing') }}">Clips</a>
+      <a href="{{ url_for('setup') }}">Profile</a>
+    </nav>
+  </header>
+
+  <main class="app-main">
+    {% block content %}{% endblock %}
+  </main>
+
+  <footer class="app-footer">
+    <span>Local only · Nothing leaves your machine</span>
+  </footer>
+
+  <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

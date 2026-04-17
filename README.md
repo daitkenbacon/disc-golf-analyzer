@@ -12,7 +12,11 @@ Runs entirely locally. Nothing leaves your machine.
 
 ## Quickstart
 
-Two supported workflows. Pick one.
+Three supported workflows. Pick one.
+
+- **A. AI coach** — drop a clip, get natural-language coaching. The richest output.
+- **B. Local GUI** — upload, analyze, and view results in your browser. No AI, but no shell either.
+- **C. CLI** — you run `python`, you read JSON.
 
 ### A. Use with an AI coach (recommended)
 
@@ -44,7 +48,29 @@ On first run, if `config.yaml` doesn't exist, the AI will interview you to
 build your player profile (handedness, distance range, level, known issues).
 One question at a time — takes two minutes.
 
-### B. Pure CLI (no AI)
+### B. Local GUI (no AI, no shell)
+
+1. **Set up the repo once** — see [Setup](#setup).
+2. **Start the local server**:
+   ```bash
+   python scripts/serve.py
+   ```
+   This boots a Flask app on `http://127.0.0.1:8765` and opens your browser.
+   Nothing is hosted externally; the app only listens on localhost.
+3. **Walk the wizard.** First run asks for your profile (handedness, distance
+   range, level, known issues) and writes it to `config.yaml`.
+4. **Upload a clip.** Drag-and-drop into the dropzone, or click to pick a
+   file. Accepts `.mov`, `.mp4`, `.m4v`, `.avi`, `.mkv`.
+5. **Analyze.** Pick one or both pipelines (cv2 is fast; pose adds joint
+   angles). Pipeline output streams live to the page.
+6. **Scrub the results.** The results page shows the annotated video with
+   clickable event chapter markers, a metrics table with traffic-light
+   coloring tuned to your level, event keyframes, and a "Copy metrics JSON"
+   button for pasting into any AI coach. If the auto-detected events look
+   wrong, the **Events look wrong?** link opens a frame-accurate scrubber
+   (keys `,` `.` `j` `k` `l`) where you can pin events by eye and re-run.
+
+### C. Pure CLI (no AI, no UI)
 
 1. **Set up the repo once** — see [Setup](#setup).
 2. **Drop a clip** into `clips/`.
@@ -232,6 +258,8 @@ scripts/
   analyze_throw_cv.py    # cv2 pipeline (default for coaching)
   analyze_throw.py       # pose pipeline (MediaPipe-based)
   extract_keyframes.py   # pull arbitrary frames from a clip
+  serve.py               # launches the local web UI on 127.0.0.1:8765
+web/                     # Flask app + templates + static assets for the GUI
 config.example.yaml      # copy to config.yaml and edit
 COACH.md                 # coaching prompt (drives the AI's voice)
 CLAUDE.md                # agent-side instructions (Cowork / Claude Code)

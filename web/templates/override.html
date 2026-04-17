@@ -1,0 +1,269 @@
+{% extends "base.html" %}
+{% block title %}Override events · {{ clip_name }} · Disc Golf Analyzer{% endblock %}
+
+{% block content %}
+<section class="stack">
+  <div>
+    <h1>Override events <span class="mono">{{ clip_name }}</span></h1>
+    <p class="muted">
+      When the auto-detector mis-labels events, scrub to the right frame and
+      pin it yourself. The pipeline re-runs on your frame numbers and rebuilds
+      metrics + the annotated video.
+    </p>
+  </div>
+
+  <div class="card">
+    <h2>Scrub</h2>
+    {% if available %}
+    <div class="dim" style="margin-bottom: 8px;">
+      Using the raw clip so annotations don't bias your eye. Current detections
+      from <strong>{{ preferred }}</strong> are pre-filled below — clear any you
+      want to force the pipeline to re-detect.
+    </div>
+    {% endif %}
+
+    <video
+      id="scrub-video"
+      class="analyzer-video"
+      controls
+      preload="metadata"
+      data-fps="{{ (metrics or {}).get('fps', 30) }}"
+    >
+      <source src="{{ url_for('serve_clip', filename=clip_name) }}" />
+    </video>
+
+    <div class="row" style="margin-top: 10px; gap: 8px;">
+      <button type="button" class="btn" data-step="-10">− 10 frames</button>
+      <button type="button" class="btn" data-step="-1">− 1 frame</button>
+      <button type="button" class="btn" id="btn-playpause">Play / Pause</button>
+      <button type="button" class="btn" data-step="1">+ 1 frame</button>
+      <button type="button" class="btn" data-step="10">+ 10 frames</button>
+      <div class="row" style="margin-left: auto; gap: 12px;">
+        <span class="dim">Frame</span>
+        <span id="frame-readout" class="mono" style="font-size: 18px;">0</span>
+      </div>
+    </div>
+
+    <div class="scrub-bar">
+      <span class="dim">Keys:</span>
+      <kbd>,</kbd> <span class="dim">−1</span>
+      <kbd>.</kbd> <span class="dim">+1</span>
+      <kbd>j</kbd> <span class="dim">−10</span>
+      <kbd>l</kbd> <span class="dim">+10</span>
+      <kbd>k</kbd> <span class="dim">play/pause</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Pin events</h2>
+    <p class="muted" style="margin-top: 0;">
+      Only pin what you're confident about. Leave a slot empty to let the
+      pipeline re-detect that event. Setup is optional.
+    </p>
+
+    <div class="override-controls" id="override-controls">
+      {% for ev, label in [
+        ('setup', 'Setup — first stable pose'),
+        ('plant', 'Plant — lead foot sets'),
+        ('reach_back', 'Reach-back — arm fully behind'),
+        ('power_pocket', 'Power pocket — disc at chest'),
+        ('hit', 'Hit — release moment'),
+        ('release', 'Release — after hit, arm extends')
+      ] %}
+      {% set ev_idx = (metrics.get('events', {}) or {}).get(ev ~ '_idx') %}
+      <div class="override-event" data-event="{{ ev }}">
+        <div class="name">{{ label }}</div>
+        <div class="frame {% if ev_idx is none %}unset{% endif %}" data-frame-display>
+          {% if ev_idx is not none %}{{ ev_idx }}{% else %}—{% endif %}
+        </div>
+        <div class="row" style="gap: 6px;">
+          <button type="button" class="btn" data-pin-event="{{ ev }}">Pin to current</button>
+          <button type="button" class="btn ghost" data-clear-event="{{ ev }}">Clear</button>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Re-run</h2>
+
+    <div>
+      <label>Pipelines to re-run</label>
+      <div class="stack" style="margin-top: 6px;">
+        <label class="row" style="align-items: flex-start; gap: 8px;">
+          <input type="checkbox" name="pipeline" value="cv2"
+                 {% if 'cv2' in available %}checked{% endif %} />
+          <span><strong>cv2</strong> <span class="dim">— fast, tempo + plant.</span></span>
+        </label>
+        <label class="row" style="align-items: flex-start; gap: 8px;">
+          <input type="checkbox" name="pipeline" value="pose"
+                 {% if 'pose' in available %}checked{% endif %} />
+          <span><strong>pose</strong> <span class="dim">— joint angles + kinematics.</span></span>
+        </label>
+      </div>
+    </div>
+
+    <div style="margin-top: 14px;">
+      <label for="notes">Notes <span class="dim">(optional, logged to history)</span></label>
+      <input id="notes" name="notes" type="text" placeholder="e.g. hand-corrected events after pose misfire" />
+    </div>
+
+    <div class="row space-between" style="margin-top: 16px;">
+      <a href="{{ url_for('results_page', clip=clip_name) }}" class="btn ghost">← Back to results</a>
+      <button type="button" id="btn-rerun" class="btn primary">Re-run with overrides</button>
+    </div>
+  </div>
+
+  <div class="card" id="log-card" hidden>
+    <h2>Pipeline output</h2>
+    <pre id="log" class="log"></pre>
+    <div class="row space-between" style="margin-top: 10px;">
+      <div id="run-status" class="muted">Running…</div>
+      <a id="btn-view" class="btn primary" style="display:none;" href="{{ url_for('results_page', clip=clip_name) }}">View results</a>
+    </div>
+  </div>
+</section>
+
+<script>
+(function () {
+  const video = document.getElementById("scrub-video");
+  const fps = parseFloat(video.dataset.fps) || 30;
+  const frameReadout = document.getElementById("frame-readout");
+  const playPauseBtn = document.getElementById("btn-playpause");
+
+  // ---- Frame readout, updated as time changes ----
+  function currentFrame() {
+    return DGA.timeToFrame(video.currentTime, fps);
+  }
+  function updateReadout() {
+    frameReadout.textContent = currentFrame();
+  }
+  video.addEventListener("timeupdate", updateReadout);
+  video.addEventListener("seeked", updateReadout);
+  video.addEventListener("loadedmetadata", updateReadout);
+
+  // ---- Step buttons ----
+  function stepFrames(n) {
+    if (!isFinite(video.duration)) return;
+    video.pause();
+    const target = Math.max(0, Math.min(video.duration, video.currentTime + n / fps));
+    video.currentTime = target;
+  }
+  document.querySelectorAll("[data-step]").forEach((b) => {
+    b.addEventListener("click", () => stepFrames(parseInt(b.dataset.step, 10)));
+  });
+  playPauseBtn.addEventListener("click", () => {
+    if (video.paused) { video.play(); } else { video.pause(); }
+  });
+
+  // ---- Keyboard shortcuts (ignore when typing in an input) ----
+  function isTypingTarget(el) {
+    return el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable);
+  }
+  document.addEventListener("keydown", (e) => {
+    if (isTypingTarget(e.target)) return;
+    if (e.key === ",") { stepFrames(-1); e.preventDefault(); }
+    else if (e.key === ".") { stepFrames(1); e.preventDefault(); }
+    else if (e.key === "j") { stepFrames(-10); e.preventDefault(); }
+    else if (e.key === "l") { stepFrames(10); e.preventDefault(); }
+    else if (e.key === "k") {
+      if (video.paused) video.play(); else video.pause();
+      e.preventDefault();
+    }
+  });
+
+  // ---- Pin / clear event frame ----
+  const overrides = {}; // { event_name: frame_int }
+
+  // Seed overrides from existing metrics (if any were rendered).
+  document.querySelectorAll(".override-event").forEach((el) => {
+    const ev = el.dataset.event;
+    const disp = el.querySelector("[data-frame-display]");
+    const txt = disp.textContent.trim();
+    const n = parseInt(txt, 10);
+    if (!isNaN(n)) overrides[ev] = n;
+  });
+
+  function setEventFrame(ev, frameOrNull) {
+    const el = document.querySelector(`.override-event[data-event="${ev}"]`);
+    if (!el) return;
+    const disp = el.querySelector("[data-frame-display]");
+    if (frameOrNull == null) {
+      delete overrides[ev];
+      disp.textContent = "—";
+      disp.classList.add("unset");
+    } else {
+      overrides[ev] = frameOrNull;
+      disp.textContent = String(frameOrNull);
+      disp.classList.remove("unset");
+    }
+  }
+
+  document.querySelectorAll("[data-pin-event]").forEach((b) => {
+    b.addEventListener("click", () => setEventFrame(b.dataset.pinEvent, currentFrame()));
+  });
+  document.querySelectorAll("[data-clear-event]").forEach((b) => {
+    b.addEventListener("click", () => setEventFrame(b.dataset.clearEvent, null));
+  });
+
+  // ---- Re-run ----
+  const rerunBtn = document.getElementById("btn-rerun");
+  const logCard = document.getElementById("log-card");
+  const logEl = document.getElementById("log");
+  const statusEl = document.getElementById("run-status");
+  const viewBtn = document.getElementById("btn-view");
+
+  const clipName = {{ clip_name | tojson }};
+
+  rerunBtn.addEventListener("click", async () => {
+    const pipelines = Array.from(
+      document.querySelectorAll('input[name="pipeline"]:checked')
+    ).map((c) => c.value);
+    if (!pipelines.length) {
+      alert("Pick at least one pipeline.");
+      return;
+    }
+
+    const notes = document.getElementById("notes").value.trim();
+
+    rerunBtn.disabled = true;
+    rerunBtn.textContent = "Running…";
+    logCard.hidden = false;
+    logEl.textContent = "";
+    statusEl.textContent = "Running…";
+    statusEl.style.color = "var(--text-dim)";
+    viewBtn.style.display = "none";
+
+    let sawError = false;
+
+    try {
+      await DGA.streamPost("/api/analyze",
+        { clip: clipName, pipelines, notes, overrides },
+        (line) => {
+          logEl.textContent += line + "\n";
+          logEl.scrollTop = logEl.scrollHeight;
+          if (/\[error\]/.test(line)) sawError = true;
+        }
+      );
+
+      if (sawError) {
+        statusEl.textContent = "Finished with errors — see log.";
+        statusEl.style.color = "var(--err)";
+      } else {
+        statusEl.textContent = "Done.";
+        statusEl.style.color = "var(--ok)";
+        viewBtn.style.display = "inline-block";
+      }
+    } catch (err) {
+      logEl.textContent += `\n[client error] ${err.message}\n`;
+      statusEl.textContent = "Connection failed — see log.";
+      statusEl.style.color = "var(--err)";
+    } finally {
+      rerunBtn.disabled = false;
+      rerunBtn.textContent = "Re-run with overrides";
+    }
+  });
+})();
+</script>
+{% endblock %}
