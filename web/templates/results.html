@@ -116,9 +116,14 @@
       <div class="keyframes">
         {% for kf in keyframes %}
         <figure style="margin: 0;">
-          <a href="{{ kf.src }}?v={{ kf.version }}" target="_blank" rel="noopener">
-            <img src="{{ kf.src }}?v={{ kf.version }}" alt="{{ kf.event }}" loading="lazy" />
-          </a>
+          <img
+            src="{{ kf.src }}?v={{ kf.version }}"
+            alt="{{ kf.event }}"
+            loading="lazy"
+            class="keyframe-thumb"
+            data-event="{{ kf.event }}"
+            data-full="{{ kf.src }}?v={{ kf.version }}"
+          />
           <figcaption>{{ kf.event.replace('_', ' ') }}</figcaption>
         </figure>
         {% endfor %}
@@ -127,6 +132,16 @@
     {% endif %}
   </div>
   {% endfor %}
+
+  <dialog id="keyframe-lightbox" class="lightbox" aria-label="Keyframe viewer">
+    <button type="button" class="lightbox-close" data-lightbox-close aria-label="Close">×</button>
+    <button type="button" class="lightbox-nav prev" data-lightbox-prev aria-label="Previous keyframe">‹</button>
+    <button type="button" class="lightbox-nav next" data-lightbox-next aria-label="Next keyframe">›</button>
+    <figure class="lightbox-body">
+      <img id="lightbox-img" alt="" />
+      <figcaption id="lightbox-caption" class="lightbox-caption"></figcaption>
+    </figure>
+  </dialog>
 
   <div class="card">
     <h2>Share with an AI coach</h2>
@@ -166,6 +181,71 @@
       video.pause();
     });
   });
+
+  // ---- Keyframe lightbox ----
+  // Images live inside per-pipeline `.keyframes` groups. Clicking one opens
+  // a shared <dialog> with prev/next navigation scoped to that group. ESC is
+  // handled natively by <dialog>; we add backdrop-click + arrow keys.
+  const dialog = document.getElementById("keyframe-lightbox");
+  if (dialog) {
+    const imgEl = document.getElementById("lightbox-img");
+    const capEl = document.getElementById("lightbox-caption");
+    let group = [];   // array of {src, event}
+    let index = 0;
+
+    const render = () => {
+      if (!group.length) return;
+      const item = group[index];
+      imgEl.src = item.src;
+      imgEl.alt = item.event;
+      const pretty = item.event.replace(/_/g, " ");
+      capEl.textContent = `${pretty}  (${index + 1} of ${group.length})`;
+    };
+
+    const openFor = (thumb) => {
+      const container = thumb.closest(".keyframes");
+      if (!container) return;
+      const thumbs = Array.from(container.querySelectorAll(".keyframe-thumb"));
+      group = thumbs.map((t) => ({
+        src: t.dataset.full || t.src,
+        event: t.dataset.event || t.alt || "",
+      }));
+      index = Math.max(0, thumbs.indexOf(thumb));
+      render();
+      if (typeof dialog.showModal === "function") {
+        dialog.showModal();
+      } else {
+        // Fallback for ancient browsers: just set open attribute.
+        dialog.setAttribute("open", "");
+      }
+    };
+
+    const step = (delta) => {
+      if (!group.length) return;
+      index = (index + delta + group.length) % group.length;
+      render();
+    };
+
+    document.querySelectorAll(".keyframe-thumb").forEach((thumb) => {
+      thumb.addEventListener("click", () => openFor(thumb));
+    });
+
+    dialog.querySelector("[data-lightbox-close]").addEventListener("click", () => dialog.close());
+    dialog.querySelector("[data-lightbox-prev]").addEventListener("click", () => step(-1));
+    dialog.querySelector("[data-lightbox-next]").addEventListener("click", () => step(1));
+
+    // Backdrop click (target === dialog, not the figure inside it) closes.
+    dialog.addEventListener("click", (e) => {
+      if (e.target === dialog) dialog.close();
+    });
+
+    // Arrow keys navigate; only while dialog is open.
+    document.addEventListener("keydown", (e) => {
+      if (!dialog.open) return;
+      if (e.key === "ArrowLeft") { e.preventDefault(); step(-1); }
+      if (e.key === "ArrowRight") { e.preventDefault(); step(1); }
+    });
+  }
 
   // ---- Copy-metrics-JSON buttons ----
   const allMetrics = {{ metrics_by_pipeline | tojson }};
