@@ -1,112 +1,130 @@
 # Disc Golf Tee Shot Analyzer
 
-A local, privacy-respecting pipeline that takes a side-view clip of a backhand
-disc golf throw and produces quantitative metrics (plant stability, tempo
-between throw phases, motion-spike character at hit) plus an annotated video
-and event keyframes — then feeds them to a Claude "coach" that produces
-grounded, specific feedback.
+Drop in a side-view clip of your backhand drive. Get quantitative metrics
+(plant stability, throw tempo, reach-back depth, snap timing, camera drift
+compensation) plus an annotated overlay video and event keyframes. Optionally,
+hand the whole thing to an AI and get grounded, specific coaching feedback
+instead of vague "work on your form" platitudes.
 
-Designed for two audiences:
+Runs entirely locally. Nothing leaves your machine.
 
-1. **Claude Code / Cowork users** — drop a clip into `clips/`, ask Claude to
-   analyze it, get coaching. Claude runs the pipeline for you. See
-   `CLAUDE.md` for the agent-side conventions.
-2. **Python / CLI users** — run the pipeline yourself and read the JSON.
+---
 
-## Two pipelines
+## Quickstart
 
-This repo ships two analyzers. They share the event/metrics JSON shape but
-take very different paths to get there:
+Two supported workflows. Pick one.
 
-### `scripts/analyze_throw_cv.py` — active (OpenCV, silhouette + motion)
+### A. Use with an AI coach (recommended)
 
-- Background-subtraction + silhouette extraction (OpenCV MOG2)
-- Bbox-restricted motion magnitude per frame (frame-diff inside the silhouette
-  + 20% margin — blocks camera/background jitter from dominating the signal)
-- ORB-based camera-motion estimation; affine-warp stabilization if the clip
-  has >50 px drift (tripod-panning or handheld)
-- Event detection: `setup`, `plant`, `reach-back`, `power-pocket`, `hit`,
-  `release` — with a rolling-minimum motion baseline and half-prominence
-  spike-width (±0.75s bound around hit)
-- Emits `metrics/<clip>.cv.json`, an annotated overlay video, and per-event
-  keyframe stills
+1. **Set up the repo once** — see [Setup](#setup).
+2. **Record your throw.** Side-on, 30 fps or better, whole body in frame from
+   setup through follow-through. Drop the file into `clips/`.
+3. **Hand the repo to an AI that can read files and run Python.** A few
+   concrete options:
+   - **Claude Code** (terminal agent):
+     ```bash
+     cd disc-golf-analyzer
+     claude
+     ```
+     It reads `CLAUDE.md` and `COACH.md` on its own.
+   - **Cowork / Claude desktop app**: open this folder in a Project. Same
+     auto-pickup of `CLAUDE.md` / `COACH.md`.
+   - **Any other AI with file access** (ChatGPT Code Interpreter, Cursor,
+     Codex, Continue, etc.): point it at `CLAUDE.md` and `COACH.md` manually
+     and tell it to follow them.
+4. **Ask for analysis.** Example:
+   > I just dropped `my-throw.mov` in `clips/`. Run it and coach me.
+5. **What the AI will do**, per `COACH.md`:
+   - Run `scripts/analyze_throw_cv.py clips/my-throw.mov`.
+   - Read `metrics/my-throw.cv.json` and any relevant `kb/` entries.
+   - Produce **What I see** → **This session's fix** → **Drill**, grounded
+     in specific metric values and tied to your configured level.
 
-This is what coaching runs through today. It's **silhouette + motion only** —
-no joint-angle data. That means it's good at tempo, plant stability, and spike
-character; it is *not* reliable for rounding or shoulder-hip separation (those
-need down-the-line / face-on angles and/or pose estimation).
+On first run, if `config.yaml` doesn't exist, the AI will interview you to
+build your player profile (handedness, distance range, level, known issues).
+One question at a time — takes two minutes.
 
-### `scripts/analyze_throw.py` — experimental (MediaPipe Pose, WIP)
+### B. Pure CLI (no AI)
 
-The aspirational version: extract 33 body landmarks per frame and compute
-joint angles (shoulder-hip separation, wrist trajectory, elbow path, knee
-bend) directly. Currently not reliably working end-to-end — tracked in the
-repo as the starting point for the pose-based rewrite. Do not use for
-coaching until it's fixed.
+1. **Set up the repo once** — see [Setup](#setup).
+2. **Drop a clip** into `clips/`.
+3. **Run the pipeline**:
+   ```bash
+   python scripts/analyze_throw_cv.py clips/my-throw.mov
+   ```
+4. **Read the outputs**:
+   - `metrics/my-throw.cv.json` — structured metrics (see [Outputs](#outputs))
+   - `annotated/my-throw.cv.mp4` — overlay video with event labels, motion
+     meter, bbox, and tempo markers
+   - `metrics/my-throw_frames/` — event keyframe PNGs
 
-## Install
+---
 
-Requires Python 3.10+ and `ffmpeg` on PATH.
+## Setup
+
+Requires Python 3.10+ and `ffmpeg` on `PATH`. macOS: `brew install ffmpeg`.
+Ubuntu: `apt install ffmpeg`.
 
 ```bash
-git clone <your-fork-url> disc-golf-analyzer
+git clone https://github.com/daitkenbacon/disc-golf-analyzer.git
 cd disc-golf-analyzer
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp config.example.yaml config.yaml   # then edit with your profile
+cp config.example.yaml config.yaml    # edit with your profile (or let the AI interview you)
 ```
 
-macOS ffmpeg: `brew install ffmpeg`. Ubuntu: `apt install ffmpeg`.
+> `mediapipe` and `scipy` are only needed for the pose pipeline
+> (`analyze_throw.py`). If you only want the cv2 pipeline, you can comment
+> those lines out of `requirements.txt`.
 
-> `mediapipe` and `scipy` are only needed for `analyze_throw.py` (the WIP pose
-> pipeline). If you hit an install error and only want the cv2 pipeline, you
-> can comment those lines out of `requirements.txt`.
+---
 
-## CLI usage
+## The two pipelines
 
-Drop a side-view clip into `clips/`, then:
+This repo ships two analyzers. They share the event-and-metrics JSON shape
+but take different paths to get there.
 
-```bash
-python scripts/analyze_throw_cv.py clips/my-throw.mov
-```
+### `scripts/analyze_throw_cv.py` — cv2 pipeline (default)
 
-Outputs:
+Silhouette + motion, no joint angles. What it does:
 
-- `metrics/my-throw.cv.json` — structured metrics and event frame indices
-- `annotated/my-throw.cv.mp4` — overlay video with event labels, motion meter,
-  bbox, and tempo markers (suppress with `--no-annotate`)
-- `metrics/my-throw_frames/` — PNG stills for setup, plant, reach-back, power
-  pocket, hit, release
+- MOG2 background subtraction + bbox-restricted frame-diff motion magnitude
+- ORB-based camera-motion estimation; affine-warp stabilization on panned clips
+- Event detection (`setup`, `plant`, `reach-back`, `power-pocket`, `hit`,
+  `release`) from rolling-minimum motion baseline + spike prominence
+- Emits `metrics/<clip>.cv.json`, `annotated/<clip>.cv.mp4`,
+  `metrics/<clip>_frames/`
 
-Additional stills (arbitrary frame indices, e.g. for a tempo-timeline montage):
+**Strongest signals**: tempo, plant stability, hit-spike character.
+**Won't tell you about**: rounding, shoulder-hip separation, grip — no joint
+data. The coach (`COACH.md`) flags when a session needs a different camera
+angle.
 
-```bash
-python scripts/extract_keyframes.py clips/my-throw.mov 29 163 172 195 208
-```
+### `scripts/analyze_throw.py` — pose pipeline
 
-### Event overrides
+MediaPipe Pose, 33 body landmarks per frame. Same events, but detected from
+wrist kinematics; additional joint-angle metrics (reach-back extent vs torso
+length, hip-vs-shoulder lead, spine lean at hit, release height normalized to
+torso, wrist-path sagittal deviation). Emits `metrics/<clip>.pose.json`,
+`annotated/<clip>.pose.mp4`, `metrics/<clip>.pose_frames/` — namespaced so it
+coexists with cv2 outputs.
 
-When the auto-detector picks the wrong frame for an event (common on fast
-throws with little post-release footage, or heavily panned clips), pin the
-event manually:
+### Which to use
 
-```bash
-python scripts/analyze_throw_cv.py clips/my-throw.mov \
-  --setup 29 --plant 163 --reach-back 172 --power-pocket 195 --hit 208
-```
+| Goal | Pipeline |
+|---|---|
+| Tempo, plant stability, general coaching | cv2 |
+| Reach-back depth, hip lead, spine lean, release height | pose |
+| You're running coaching through `COACH.md` | cv2 (default) |
+| You want both — run both | both (outputs are separately namespaced) |
 
-Any flag explicitly set overrides the auto-detector for that one event;
-unspecified events are still auto-detected.
+Command shape is the same for both scripts (including event overrides below).
 
-### iPhone slo-mo clips
+---
 
-If an HEVC `.MOV` refuses to open, transcode first:
+## Outputs
 
-```bash
-ffmpeg -i input.MOV -c:v libx264 -crf 18 -preset veryfast -c:a aac output.mp4
-```
-
-## Metrics reference
+### Metrics JSON (cv2)
 
 Key fields in `metrics/<clip>.cv.json`:
 
@@ -123,57 +141,112 @@ Key fields in `metrics/<clip>.cv.json`:
 | `metrics.cam_max_drift_px` | Max ORB-estimated camera translation (0 = tripod) |
 | `metrics.stabilization_applied` | True if the clip was warped before analysis |
 
+### Metrics JSON (pose)
+
+Additional fields in `metrics/<clip>.pose.json`:
+
+| Field | Meaning |
+|---|---|
+| `metrics.reach_back_extent_ratio` | Wrist distance behind hip-midline / torso length. Target 0.55–0.80; >1.0 suggests over-reach |
+| `metrics.hip_lead_ms` | How many ms hips rotate before shoulders. Positive = correct kinetic chain |
+| `metrics.spine_lean_deg_at_hit` | Forward/back spine lean at hit. Strong negative = leaning back at release |
+| `metrics.release_height_norm` | Wrist height at release, normalized to torso (0 = hip, 1 = shoulder) |
+| `metrics.wrist_path_sagittal_deviation_px` | How far the wrist deviates from a straight pull-path — rounding proxy |
+| `metrics.plant_ankle_x_stddev_px` / `y_stddev_px` | Plant stability, separately for horizontal and vertical wobble |
+
+### Annotated video
+
+Each pipeline writes `annotated/<clip>.<pipeline>.mp4` with event labels
+burned in at the right frame, a motion / velocity meter, and bbox or skeleton
+overlay. Scrub through it when you want to ground-truth event detection.
+
+### Event keyframes
+
+Stills for setup, plant, reach-back, power-pocket, hit, release are written
+to `metrics/<clip>_frames/` (cv2) or `metrics/<clip>.pose_frames/` (pose).
+
+Arbitrary extra stills:
+
+```bash
+python scripts/extract_keyframes.py clips/my-throw.mov 29 163 172 195 208
+```
+
+---
+
+## Troubleshooting
+
+### Auto-detected events look wrong
+
+Common. Fast throws with little post-release footage, or clips with heavy
+camera panning, can fool the hit detector into picking a follow-through motion
+peak. Symptom: `reach_back_to_hit_ms` or `power_pocket_to_hit_ms` outside the
+500–1500 ms range for a normal recreational throw.
+
+Pin any event manually — unspecified events are still auto-detected:
+
+```bash
+python scripts/analyze_throw_cv.py clips/my-throw.mov \
+  --setup 29 --plant 163 --reach-back 172 --power-pocket 195 --hit 208 --release 215
+```
+
+Same flags work on `analyze_throw.py`.
+
+Easiest way to find the right frame numbers: scrub the annotated video (or
+run `extract_keyframes.py` across the clip) and eyeball when each phase
+actually happens.
+
+### iPhone HEVC `.MOV` won't open
+
+Transcode to H.264 first:
+
+```bash
+ffmpeg -i input.MOV -c:v libx264 -crf 18 -preset veryfast -c:a aac output.mp4
+```
+
+### `plant_foot_y_stddev` looks high but plant looked clean
+
+ORB-warp + `BORDER_REPLICATE` stabilization can create a stretched strip
+along the panned edge; MOG2 picks it up as foreground and inflates the bbox.
+Visual gut-check from the annotated video wins over the metric here — if the
+plant looks clean, it probably is.
+
+---
+
+## Camera angles
+
+Side-on is a solid all-rounder but has blind spots:
+
+- **Rounding** → down-the-line (behind thrower, facing target)
+- **Plant spin** → face-on
+- **X-factor magnitude** → down-the-line
+
+The pipelines still report best-effort metrics from side view; the coach
+will flag when a flagged issue genuinely needs a different angle.
+
+---
+
 ## Project layout
 
 ```
 scripts/
-  analyze_throw_cv.py    # active pipeline (run this)
-  analyze_throw.py       # WIP pose-based pipeline
+  analyze_throw_cv.py    # cv2 pipeline (default for coaching)
+  analyze_throw.py       # pose pipeline (MediaPipe-based)
   extract_keyframes.py   # pull arbitrary frames from a clip
 config.example.yaml      # copy to config.yaml and edit
-COACH.md                 # coaching prompt (drives Claude's voice)
-CLAUDE.md                # Cowork/Claude-Code agent instructions
+COACH.md                 # coaching prompt (drives the AI's voice)
+CLAUDE.md                # agent-side instructions (Cowork / Claude Code)
 kb/                      # cached coaching knowledge + drills
 clips/                   # input clips (gitignored)
 metrics/                 # output JSON + event PNGs (gitignored)
 annotated/               # overlay videos (gitignored)
 keyframes/               # extra stills (gitignored)
+history.jsonl            # trend log accumulated per session (gitignored)
 ```
 
-Pipeline-generated outputs and your personal `config.yaml` / `history.jsonl`
-are gitignored. See `.gitignore`.
+Your personal `config.yaml`, `history.jsonl`, and all pipeline outputs are
+gitignored. See `.gitignore`.
 
-## Camera angle notes
-
-Side view is a solid all-rounder but has blind spots:
-
-- **Rounding** → best from down-the-line (behind thrower, facing target)
-- **Plant spin** → best face-on
-- **X-factor magnitude** → best from down-the-line
-
-The cv2 pipeline still reports best-effort metrics from side view; the coach
-will flag when a session needs a different angle.
-
-## Known limitations (cv2 pipeline)
-
-- **Hit detection on fast throws.** If the clip ends soon after release,
-  follow-through motion can be larger than the release spike and get picked as
-  "hit". Symptom: `reach_back_to_hit_ms` or `power_pocket_to_hit_ms` looks
-  implausible (e.g. 80 ms or 1400 ms for a clean throw). Workaround: eyeball
-  the keyframes and pass `--hit N` and any other wrong events on the command
-  line.
-- **Stabilization edge artifacts.** On heavily panned clips, ORB-warp +
-  `BORDER_REPLICATE` creates a stretched strip along one edge that MOG2 picks
-  up as foreground and inflates the silhouette bbox. If
-  `plant_foot_y_stddev` is high but the plant looks clean visually, suspect
-  artifacts rather than a real settling issue.
-- **No pose data.** Rounding, early shoulders, grip flaws, shoulder-hip
-  separation — all need human-eye confirmation from the annotated video or a
-  down-the-line angle. The pose pipeline (`analyze_throw.py`) is meant to
-  close this gap once it's working.
-- **Backhand focus.** Metrics and the KB are tuned for backhand drives.
-  Forehand throws will produce numbers but the event-detection heuristics and
-  coaching cues assume backhand mechanics.
+---
 
 ## License
 
