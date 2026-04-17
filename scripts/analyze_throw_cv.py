@@ -441,9 +441,13 @@ def detect_events(frames: list[FrameData], fps: float) -> Events:
     if len(frames) < 10:
         return events
 
-    motion = _smooth(np.array([f.motion_mag for f in frames]), window=max(5, int(fps // 6) | 1))
-    cx = _smooth(_series(frames, "centroid_x"), window=max(5, int(fps // 6) | 1))
-    foot_y = _smooth(_series(frames, "foot_y"), window=max(5, int(fps // 6) | 1))
+    smooth_win = max(5, int(fps // 6) | 1)
+    motion = _smooth(np.array([f.motion_mag for f in frames]), window=smooth_win)
+    cx = _smooth(_series(frames, "centroid_x"), window=smooth_win)
+    foot_y = _smooth(_series(frames, "foot_y"), window=smooth_win)
+    left_x = _smooth(_series(frames, "left_x"), window=smooth_win)
+    right_x = _smooth(_series(frames, "right_x"), window=smooth_win)
+    bbox_width = right_x - left_x
 
     # Facing direction from net centroid travel
     early = np.nanmean(cx[: max(1, len(cx) // 5)])
@@ -455,27 +459,87 @@ def detect_events(frames: list[FrameData], fps: float) -> Events:
         else:
             events.facing_direction = "right" if delta > 0 else "left"
 
-    # Hit = peak motion in the last 60% of the clip
+    # --- Hit = peak motion in the last 60% of the clip ---
     search_start = int(len(motion) * 0.4)
     local = motion[search_start:]
     hit_rel = int(np.argmax(local))
     events.hit_idx = search_start + hit_rel
 
-    # Reach-back = LAST LOCAL MINIMUM of motion BEFORE the hit, within ~600ms
-    window_frames = int(fps * 0.8)
-    rb_search_lo = max(0, events.hit_idx - window_frames)
-    rb_slice = motion[rb_search_lo:events.hit_idx]
-    if len(rb_slice) > 3:
-        # find local minima by negating and using find_peaks
-        neg = -rb_slice
-        peaks, _ = find_peaks(neg, distance=max(2, int(fps * 0.08)))
-        if len(peaks) > 0:
-            # take the one closest to the hit but not directly adjacent
-            events.reach_back_idx = int(rb_search_lo + peaks[-1])
-        else:
-            events.reach_back_idx = int(rb_search_lo + int(np.argmin(rb_slice)))
+    # --- Setup = frame before sustained motion begins. Detected early so
+    # reach-back and plant can use it as a soft lower bound. ---
+    baseline = float(np.nanmedian(motion[: max(3, len(motion) // 10)]))
+    thresh = max(baseline * 3.0, baseline + 50.0)
+    above = np.where(motion > thresh)[0]
+    if len(above) > 0:
+        events.setup_idx = max(0, int(above[0]) - 1)
 
-    # Release = first local minimum of motion AFTER the hit
+    # Effective search window for pre-hit events. We cap at ~1.5s before the
+    # hit regardless of where setup_idx was — on long clips with a multi-step
+    # runup, reach-back and plant both live in the final second or so before
+    # the hit. If setup_idx is *inside* that 1.5s window we respect it (don't
+    # wander into the warmup); otherwise we let the 1.5s cap rule.
+    setup_lo = events.setup_idx if events.setup_idx is not None else 0
+    window_lo = max(0, events.hit_idx - int(fps * 1.5))
+    pre_lo = max(setup_lo, window_lo)
+    # Exclude the last ~80ms before the hit itself so the swing-through doesn't
+    # masquerade as reach-back.
+    pre_hi = max(pre_lo + 3, events.hit_idx - max(1, int(fps * 0.08)))
+
+    # --- Reach-back = frame where the throwing arm is maximally extended.
+    # On a lateral clip this shows up as the silhouette's widest frame in the
+    # pre-hit window — the extended arm sticks out beyond the body. The catch
+    # is that the swing-through arm *also* widens the silhouette, so naive
+    # argmax(width) can pick a pull-phase frame instead of the real reach-back.
+    #
+    # To isolate reach-back we cap the search at the onset of the forward
+    # pull: the first frame where the silhouette's TARGET-side edge extends
+    # beyond its pre-pull baseline. For facing="left" (target to the left of
+    # frame) the target-side edge is left_x; for "right", right_x. Anything
+    # wider than that cap is the arm already swinging through.
+    #
+    # On standstill clips we fall back to the legacy motion-minimum heuristic
+    # (there's no reliable lateral signal to exploit). ---
+    if events.facing_direction in ("right", "left") and pre_hi - pre_lo >= 4:
+        if events.facing_direction == "left":
+            # target is to the left — forward-extension grows as cx-lx grows
+            forward_asym = cx - left_x
+        else:
+            # facing == "right" — forward-extension grows as rx-cx grows
+            forward_asym = right_x - cx
+
+        # Pre-pull baseline: median of the first half of the pre-hit window.
+        pre_mid = pre_lo + max(3, (pre_hi - pre_lo) // 2)
+        baseline_pre = forward_asym[pre_lo:pre_mid]
+        finite_pre = baseline_pre[np.isfinite(baseline_pre)]
+        if finite_pre.size > 0:
+            fa_baseline = float(np.nanmedian(finite_pre))
+            fa_threshold = max(fa_baseline * 1.6, fa_baseline + 30.0)
+            fa_pre = forward_asym[pre_lo:events.hit_idx]
+            fa_clean = _interp_nan(fa_pre.copy())
+            above_thr = np.where(fa_clean > fa_threshold)[0]
+            pull_start = int(pre_lo + above_thr[0]) if len(above_thr) > 0 else int(pre_hi)
+        else:
+            pull_start = int(pre_hi)
+
+        rb_search_hi = min(pre_hi, pull_start)
+        if rb_search_hi - pre_lo >= 4:
+            w_seg = bbox_width[pre_lo:rb_search_hi]
+            if np.isfinite(w_seg).any():
+                events.reach_back_idx = int(pre_lo + int(np.nanargmax(w_seg)))
+    if events.reach_back_idx is None:
+        # Standstill / width-unavailable fallback: last local min of motion
+        rb_window_frames = int(fps * 0.8)
+        rb_lo = max(pre_lo, events.hit_idx - rb_window_frames)
+        rb_slice = motion[rb_lo:events.hit_idx]
+        if len(rb_slice) > 3:
+            neg = -rb_slice
+            peaks, _ = find_peaks(neg, distance=max(2, int(fps * 0.08)))
+            if len(peaks) > 0:
+                events.reach_back_idx = int(rb_lo + peaks[-1])
+            else:
+                events.reach_back_idx = int(rb_lo + int(np.argmin(rb_slice)))
+
+    # --- Release = first local minimum of motion AFTER the hit ---
     rel_search_hi = min(len(motion), events.hit_idx + int(fps * 0.6))
     rel_slice = motion[events.hit_idx:rel_search_hi]
     if len(rel_slice) > 3:
@@ -486,33 +550,43 @@ def detect_events(frames: list[FrameData], fps: float) -> Events:
         else:
             events.release_idx = int(events.hit_idx + int(np.argmin(rel_slice)))
 
-    # Plant = first frame in a short pre-reach-back window where foot_y settles
-    # into its local low (i.e. largest y since y grows downward). We restrict the
-    # search to the 0.6s immediately preceding reach-back so warmup poses cannot
-    # be mistaken for the plant.
-    plant_search_hi = events.reach_back_idx or events.hit_idx
-    if plant_search_hi is not None and plant_search_hi > 5:
-        # Window: [reach_back - 0.6s, reach_back]. If the clip is too short, fall
-        # back to [reach_back - 0.8s-worth, reach_back].
-        win_frames = max(3, int(fps * 0.6))
-        lo = max(0, plant_search_hi - win_frames)
-        seg = foot_y[lo:plant_search_hi]
+    # --- Plant = earliest frame in [pre_lo, hit] where lead foot y settles at
+    # its local max (image y grows downward, so foot on ground = largest y)
+    # and stays there for a sustained run of frames. Structurally decoupled
+    # from reach_back: plant can happen before OR after reach-back — ideal is
+    # simultaneous, but real players vary. ---
+    plant_search_lo = pre_lo
+    plant_search_hi = events.hit_idx
+    if plant_search_hi is not None and plant_search_hi - plant_search_lo >= 3:
+        seg = foot_y[plant_search_lo:plant_search_hi]
         if np.isfinite(seg).any() and len(seg) > 0:
-            target = np.nanmax(seg)
-            # First frame in the window within 4px of the local max — "foot planted"
-            within = np.where(np.abs(seg - target) < 4)[0]
-            if len(within) > 0:
-                events.plant_idx = int(lo + within[0])
-            else:
-                # Degenerate case: just take the frame at local max
-                events.plant_idx = int(lo + int(np.nanargmax(seg)))
-
-    # Setup = frame before sustained motion begins (first frame where smoothed motion > baseline*3)
-    baseline = float(np.nanmedian(motion[: max(3, len(motion) // 10)]))
-    thresh = max(baseline * 3.0, baseline + 50.0)
-    above = np.where(motion > thresh)[0]
-    if len(above) > 0:
-        events.setup_idx = max(0, int(above[0]) - 1)
+            seg_clean = _interp_nan(seg.copy())
+            target = np.nanmax(seg_clean)
+            tol = 4.0  # pixels — same tolerance as the prior implementation
+            within_mask = np.abs(seg_clean - target) < tol
+            # Require a sustained run (~100ms of stability) so a single noisy
+            # frame at the local max doesn't win.
+            min_run = max(3, int(fps * 0.1))
+            run_start: int | None = None
+            plant_rel: int | None = None
+            for i, is_within in enumerate(within_mask):
+                if is_within:
+                    if run_start is None:
+                        run_start = i
+                    if i - run_start + 1 >= min_run:
+                        plant_rel = run_start
+                        break
+                else:
+                    run_start = None
+            if plant_rel is None:
+                # No sustained run — take the first frame inside the tolerance
+                # band, or (degenerate) the frame at the local max.
+                within = np.where(within_mask)[0]
+                if len(within) > 0:
+                    plant_rel = int(within[0])
+                else:
+                    plant_rel = int(np.nanargmax(seg_clean))
+            events.plant_idx = int(plant_search_lo + plant_rel)
 
     return events
 

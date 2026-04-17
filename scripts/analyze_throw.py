@@ -466,23 +466,41 @@ def detect_events(frames: list[FramePose], fps: float, handedness: str) -> Event
                 events.power_pocket_idx = int(pp_lo + pp_local)
 
     # --- Plant: front-ankle y at its MAX (image y grows downward, so foot on
-    # ground = HIGH pixel y; foot lifted = LOW pixel y). Earliest frame within
-    # 6 px of the per-window max, searched in the 1 s preceding reach-back
-    # (plant happens before reach-back in a proper x-step backhand). ---
+    # ground = HIGH pixel y; foot lifted = LOW pixel y). Structurally decoupled
+    # from reach-back: plant can happen before OR after reach-back. Ideal form
+    # has them simultaneous, but real players vary — some plant early, some
+    # late, and some "plant" is really a weight-settle on standstill throws.
+    # We search the full [hit − 1.2s, hit] window for the earliest sustained
+    # foot-down and require ~100ms of stability so a single noisy frame at the
+    # local max doesn't win. ---
     ay = _series(frames, plant_foot, 1)
-    if events.reach_back_idx is not None:
-        pl_hi = events.reach_back_idx
-        pl_lo = max(0, pl_hi - int(fps * 1.0))
-        if pl_hi - pl_lo >= 2:
-            window = ay[pl_lo:pl_hi]
-            if np.isfinite(window).any():
-                target = np.nanmax(window)
-                within = np.where(np.abs(window - target) < 6)[0]
-                if len(within) > 0:
-                    # Earliest frame the foot settles at its ground-contact y
-                    events.plant_idx = int(pl_lo + int(within[0]))
+    pl_lo = max(0, hit_idx - int(fps * 1.2))
+    pl_hi = hit_idx
+    if pl_hi - pl_lo >= 3:
+        window = ay[pl_lo:pl_hi]
+        if np.isfinite(window).any():
+            target = np.nanmax(window)
+            tol = 6.0
+            within_mask = np.abs(window - target) < tol
+            min_run = max(3, int(fps * 0.1))
+            run_start: int | None = None
+            plant_rel: int | None = None
+            for i, is_within in enumerate(within_mask):
+                if is_within:
+                    if run_start is None:
+                        run_start = i
+                    if i - run_start + 1 >= min_run:
+                        plant_rel = run_start
+                        break
                 else:
-                    events.plant_idx = int(pl_lo + int(np.nanargmax(window)))
+                    run_start = None
+            if plant_rel is None:
+                within = np.where(within_mask)[0]
+                if len(within) > 0:
+                    plant_rel = int(within[0])
+                else:
+                    plant_rel = int(np.nanargmax(window))
+            events.plant_idx = int(pl_lo + plant_rel)
 
     return events
 
