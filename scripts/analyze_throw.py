@@ -892,13 +892,13 @@ def main() -> int:
         print(f"[6/7] writing annotated video: {dst}")
         annotate_video(clip, dst, frames, events, fps)
         if not args.no_transcode:
-            result = ensure_browser_playable(dst)
-            if result == "transcoded":
+            status, detail = ensure_browser_playable(dst)
+            if status == "transcoded":
                 print("      post-processed to H.264 for browser playback")
-            elif result == "failed":
-                print("      [warn] ffmpeg transcode failed; video may not play in browser")
-            elif result == "skipped":
-                print("      [warn] ffmpeg not found; skipping H.264 transcode")
+            elif status == "failed":
+                print(f"      [warn] H.264 post-process failed — video may not play in browser: {detail}")
+            elif status == "skipped":
+                print(f"      [warn] skipping H.264 post-process: {detail}")
     else:
         print("[6/7] skipping annotation (--no-annotate)")
 

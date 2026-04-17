@@ -80,19 +80,19 @@ def main() -> int:
             continue
 
         print(f"  [...]   {path.name}  ({label} → h264)", end="", flush=True)
-        result = ensure_browser_playable(path)
-        if result == "transcoded":
+        status, detail = ensure_browser_playable(path)
+        if status == "transcoded":
             print(" ✓")
             transcoded += 1
-        elif result == "already_h264":
+        elif status == "already_h264":
             # Race — someone else transcoded while we were looking.
             print(" (already h264)")
             already += 1
-        elif result == "skipped":
-            print(" [skipped — ffmpeg not found on PATH]")
+        elif status == "skipped":
+            print(f" [skipped — {detail}]")
             skipped += 1
         else:
-            print(" [FAILED]")
+            print(f" [FAILED — {detail}]")
             failed += 1
 
     print()
