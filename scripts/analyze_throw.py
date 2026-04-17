@@ -97,10 +97,14 @@ class FramePose:
 
 @dataclass
 class Events:
-    """Frame indices for detected key events. None if not detected."""
+    """Frame indices for detected key events. None if not detected.
+
+    Stored in throw-phase order (plant → reach_back → power_pocket → hit → release).
+    """
 
     plant_idx: int | None = None
     reach_back_idx: int | None = None
+    power_pocket_idx: int | None = None    # wrist crosses torso centerline pulling forward
     hit_idx: int | None = None
     release_idx: int | None = None
     throw_wrist: str = "right_wrist"       # auto-detected
@@ -115,12 +119,15 @@ class Metrics:
     # Keyframes (ms from start)
     plant_t_ms: float | None = None
     reach_back_t_ms: float | None = None
+    power_pocket_t_ms: float | None = None
     hit_t_ms: float | None = None
     release_t_ms: float | None = None
 
     # Tempo
     plant_to_release_ms: float | None = None
-    reach_back_to_hit_ms: float | None = None
+    reach_back_to_hit_ms: float | None = None            # total pull duration
+    reach_back_to_power_pocket_ms: float | None = None   # early pull
+    power_pocket_to_hit_ms: float | None = None          # snap / final acceleration
 
     # Reach-back extent: wrist horizontal distance behind torso center
     # at reach-back peak, normalized by shoulder-to-hip (torso) length.
@@ -337,57 +344,141 @@ def detect_facing(frames: list[FramePose]) -> str:
 
 
 def detect_events(frames: list[FramePose], fps: float, handedness: str) -> Events:
+    """Detect the five key throw events from per-frame pose data.
+
+    Order of detection matters — each event narrows the search window for the
+    next. Hit → Release → Reach-back → Power-pocket → Plant.
+    """
     throw_wrist = f"{handedness}_wrist"
     plant_foot = "left_ankle" if handedness == "right" else "right_ankle"
 
     wx = _series(frames, throw_wrist, 0)
     wy = _series(frames, throw_wrist, 1)
-    speed = np.hypot(np.gradient(wx), np.gradient(wy))  # px per frame
+    wx_vel = np.gradient(wx)  # signed px/frame along the target axis
 
     events = Events(throw_wrist=throw_wrist, plant_foot_ankle=plant_foot)
     events.facing_direction = detect_facing(frames)
 
-    if len(speed) < 10:
+    if len(wx_vel) < 10:
         return events
 
-    # Hit ~ moment of peak wrist speed in the last ~40% of the clip
-    search_start = int(len(speed) * 0.4)
-    hit_idx = search_start + int(np.nanargmax(speed[search_start:]))
+    # --- Hit: peak wrist velocity *toward the target*.
+    # For facing="right", target is +x, so hit = argmax(dwx/dt).
+    # For facing="left" (or unknown/standstill), target is -x, so hit = argmin(dwx/dt).
+    # Using signed velocity along the target axis instead of |speed| excludes the
+    # cross-body follow-through, which can dominate raw speed on a decelerating throw.
+    search_start = int(len(wx_vel) * 0.4)
+    if events.facing_direction == "right":
+        hit_idx = search_start + int(np.nanargmax(wx_vel[search_start:]))
+        sign = 1.0
+    else:
+        hit_idx = search_start + int(np.nanargmin(wx_vel[search_start:]))
+        sign = -1.0
     events.hit_idx = int(hit_idx)
+    peak_signed = float(wx_vel[hit_idx])
+    peak_abs = abs(peak_signed)
 
-    # Release ~ next local minimum of speed AFTER hit (wrist decelerates and disc is gone)
+    # --- Release: first frame after hit where forward-toward-target velocity
+    # drops below 30% of peak OR reverses sign. Either means the arm has
+    # stopped accelerating toward the target — disc has left the hand.
     rel_idx = hit_idx
-    for i in range(hit_idx + 1, min(len(speed) - 1, hit_idx + int(fps * 0.5))):
-        if speed[i + 1] > speed[i] and speed[i] < speed[hit_idx] * 0.5:
+    window_end = min(len(wx_vel), hit_idx + int(fps * 0.5))
+    for i in range(hit_idx + 1, window_end):
+        v = wx_vel[i]
+        if not np.isfinite(v):
+            continue
+        # Sign reversed (arm now moving away from target)?
+        if sign > 0 and v <= 0:
+            rel_idx = i
+            break
+        if sign < 0 and v >= 0:
+            rel_idx = i
+            break
+        # Still toward target but below 30% of peak?
+        if sign > 0 and v < 0.30 * peak_abs:
+            rel_idx = i
+            break
+        if sign < 0 and v > -0.30 * peak_abs:
             rel_idx = i
             break
     events.release_idx = int(rel_idx)
 
-    # Reach-back ~ extreme wrist x behind torso BEFORE hit.
+    # --- Reach-back: last sign flip of wrist x-velocity before hit.
+    # Physically: reach-back is the moment the throwing wrist stops moving away
+    # from the target and starts pulling forward — i.e., wx_vel crosses zero.
+    # For facing="left" (target = -x), forward-time wx_vel goes POS→NEG at
+    # reach-back. For facing="right" (target = +x), it goes NEG→POS.
+    # Walking backward from hit, the first frame with opposite-sign velocity
+    # is the pre-reach-back "load" phase; the reach-back itself is the frame
+    # immediately after it in forward time.
+    #
+    # We prefer this derivative-based detection over a position-signal argmax
+    # because aggressive landmark smoothing can merge the approach-step arm
+    # swing and the throw's reach-back into a single broad peak, collapsing
+    # the position max at the (earlier, higher) approach swing. The velocity
+    # zero-crossing is invariant to that merge.
     hip_mid_x = (_series(frames, "left_hip", 0) + _series(frames, "right_hip", 0)) / 2.0
-    behind_signed = wx[:hit_idx] - hip_mid_x[:hit_idx]
-    if events.facing_direction == "right":
-        # Player moves right, so reach-back is wrist FURTHEST LEFT of hips → most negative
-        if len(behind_signed) > 0:
-            events.reach_back_idx = int(np.nanargmin(behind_signed))
-    elif events.facing_direction == "left":
-        if len(behind_signed) > 0:
-            events.reach_back_idx = int(np.nanargmax(behind_signed))
-    else:
-        # fallback: use the max |behind| before hit
-        if len(behind_signed) > 0:
-            events.reach_back_idx = int(np.nanargmax(np.abs(behind_signed)))
+    rb_lo = max(1, hit_idx - int(fps * 1.5))
+    rb_hi = hit_idx
+    rb_idx: int | None = None
+    noise_thresh = 0.5  # px/frame — suppress tiny wobbles near zero
+    for i in range(rb_hi - 1, rb_lo, -1):
+        v = wx_vel[i]
+        if not np.isfinite(v):
+            continue
+        if events.facing_direction == "right":
+            # Forward-time reach-back = NEG→POS. Walking back, look for v < -thresh.
+            if v < -noise_thresh:
+                rb_idx = i + 1
+                break
+        else:
+            # Forward-time reach-back = POS→NEG. Walking back, look for v > +thresh.
+            if v > noise_thresh:
+                rb_idx = i + 1
+                break
+    if rb_idx is None:
+        # Fallback: argmax of arm_reach in a tight 0.8 s window before hit.
+        fb_lo = max(0, hit_idx - int(fps * 0.8))
+        if hit_idx - fb_lo >= 2:
+            behind_signed = wx[fb_lo:hit_idx] - hip_mid_x[fb_lo:hit_idx]
+            if np.isfinite(behind_signed).any():
+                if events.facing_direction == "right":
+                    rb_idx = fb_lo + int(np.nanargmin(behind_signed))
+                else:
+                    rb_idx = fb_lo + int(np.nanargmax(behind_signed))
+    if rb_idx is not None:
+        events.reach_back_idx = int(min(rb_idx, hit_idx - 1))
 
-    # Plant ~ front-ankle y reaches its low (contact) before hit, and then stays low.
+    # --- Power pocket: between reach-back and hit, frame where the throwing
+    # wrist is closest to the torso center (hip midline). Geometrically, that
+    # is the wrist crossing the body as it pulls toward release. ---
+    if events.reach_back_idx is not None:
+        pp_lo = events.reach_back_idx
+        pp_hi = hit_idx
+        if pp_hi - pp_lo >= 2:
+            seg = wx[pp_lo:pp_hi] - hip_mid_x[pp_lo:pp_hi]
+            if np.isfinite(seg).any():
+                pp_local = int(np.nanargmin(np.abs(seg)))
+                events.power_pocket_idx = int(pp_lo + pp_local)
+
+    # --- Plant: front-ankle y at its MAX (image y grows downward, so foot on
+    # ground = HIGH pixel y; foot lifted = LOW pixel y). Earliest frame within
+    # 6 px of the per-window max, searched in the 1 s preceding reach-back
+    # (plant happens before reach-back in a proper x-step backhand). ---
     ay = _series(frames, plant_foot, 1)
-    # Plant = earliest frame in last 60% where ankle y is within 8px of its minimum
-    if hit_idx > 5:
-        window = ay[: hit_idx + 1]
-        if np.isfinite(window).any():
-            target = np.nanmin(window)
-            candidates = np.where(np.abs(window - target) < 8)[0]
-            if len(candidates) > 0:
-                events.plant_idx = int(candidates[0])
+    if events.reach_back_idx is not None:
+        pl_hi = events.reach_back_idx
+        pl_lo = max(0, pl_hi - int(fps * 1.0))
+        if pl_hi - pl_lo >= 2:
+            window = ay[pl_lo:pl_hi]
+            if np.isfinite(window).any():
+                target = np.nanmax(window)
+                within = np.where(np.abs(window - target) < 6)[0]
+                if len(within) > 0:
+                    # Earliest frame the foot settles at its ground-contact y
+                    events.plant_idx = int(pl_lo + int(within[0]))
+                else:
+                    events.plant_idx = int(pl_lo + int(np.nanargmax(window)))
 
     return events
 
@@ -414,13 +505,18 @@ def compute_metrics(
 
     m.plant_t_ms = t(events.plant_idx)
     m.reach_back_t_ms = t(events.reach_back_idx)
+    m.power_pocket_t_ms = t(events.power_pocket_idx)
     m.hit_t_ms = t(events.hit_idx)
     m.release_t_ms = t(events.release_idx)
 
     if m.plant_t_ms is not None and m.release_t_ms is not None:
-        m.plant_to_release_ms = m.release_t_ms - m.plant_t_ms
+        m.plant_to_release_ms = round(m.release_t_ms - m.plant_t_ms, 1)
     if m.reach_back_t_ms is not None and m.hit_t_ms is not None:
-        m.reach_back_to_hit_ms = m.hit_t_ms - m.reach_back_t_ms
+        m.reach_back_to_hit_ms = round(m.hit_t_ms - m.reach_back_t_ms, 1)
+    if m.reach_back_t_ms is not None and m.power_pocket_t_ms is not None:
+        m.reach_back_to_power_pocket_ms = round(m.power_pocket_t_ms - m.reach_back_t_ms, 1)
+    if m.power_pocket_t_ms is not None and m.hit_t_ms is not None:
+        m.power_pocket_to_hit_ms = round(m.hit_t_ms - m.power_pocket_t_ms, 1)
 
     # Reach-back extent
     if events.reach_back_idx is not None:
@@ -552,6 +648,7 @@ def annotate_video(
     event_labels = {
         events.plant_idx: "PLANT",
         events.reach_back_idx: "REACH-BACK",
+        events.power_pocket_idx: "POWER POCKET",
         events.hit_idx: "HIT",
         events.release_idx: "RELEASE",
     }
@@ -622,14 +719,15 @@ def _draw_skeleton(img, landmarks: dict[str, tuple[float, float, float]]) -> Non
 
 
 def save_event_snapshots(src: Path, events: Events, stem: str) -> None:
-    """Save a PNG per detected key event into metrics/<stem>_frames/."""
+    """Save a PNG per detected key event into metrics/<stem>.pose_frames/."""
     event_frames = {
         "plant": events.plant_idx,
         "reach_back": events.reach_back_idx,
+        "power_pocket": events.power_pocket_idx,
         "hit": events.hit_idx,
         "release": events.release_idx,
     }
-    out_dir = ROOT / "metrics" / f"{stem}_frames"
+    out_dir = ROOT / "metrics" / f"{stem}.pose_frames"
     out_dir.mkdir(parents=True, exist_ok=True)
     cap = cv2.VideoCapture(str(src))
     try:
@@ -667,8 +765,8 @@ def write_outputs(
         metrics=metrics,
     )
 
-    # Per-clip metrics JSON
-    metrics_path = ROOT / "metrics" / f"{clip.stem}.json"
+    # Per-clip metrics JSON — `.pose.json` to coexist with cv2 pipeline's `.cv.json`
+    metrics_path = ROOT / "metrics" / f"{clip.stem}.pose.json"
     metrics_path.parent.mkdir(exist_ok=True)
     with metrics_path.open("w") as f:
         json.dump(asdict(result), f, indent=2, default=str)
@@ -677,10 +775,11 @@ def write_outputs(
     history_path = ROOT / "history.jsonl"
     history_row = {
         "clip": clip.name,
+        "pipeline": "pose",
         "run_at": run_at,
         "fps": result.fps,
         "metrics": asdict(metrics),
-        "events": {k: getattr(events, k) for k in ("plant_idx", "reach_back_idx", "hit_idx", "release_idx", "throw_wrist", "facing_direction")},
+        "events": {k: getattr(events, k) for k in ("plant_idx", "reach_back_idx", "power_pocket_idx", "hit_idx", "release_idx", "throw_wrist", "facing_direction")},
         "notes": notes,
     }
     with history_path.open("a") as f:
@@ -695,10 +794,18 @@ def write_outputs(
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Analyze a disc golf tee shot video.")
+    ap = argparse.ArgumentParser(description="Analyze a disc golf tee shot video (MediaPipe pose pipeline).")
     ap.add_argument("clip", type=Path, help="path to the video file in clips/")
     ap.add_argument("--notes", default="", help="optional session notes to log")
     ap.add_argument("--no-annotate", action="store_true", help="skip writing the annotated video (faster iteration)")
+    # Event overrides — pin any event to a specific frame index, bypassing the
+    # auto-detector for that event. Mirrors analyze_throw_cv.py's CLI so the
+    # user's "ground-truth the frames" workflow is identical across pipelines.
+    ap.add_argument("--plant", type=int, default=None, help="override plant frame index")
+    ap.add_argument("--reach-back", type=int, default=None, help="override reach-back frame index")
+    ap.add_argument("--power-pocket", type=int, default=None, help="override power-pocket frame index")
+    ap.add_argument("--hit", type=int, default=None, help="override hit frame index")
+    ap.add_argument("--release", type=int, default=None, help="override release frame index")
     args = ap.parse_args()
 
     clip: Path = args.clip
@@ -725,10 +832,34 @@ def main() -> int:
 
     print("[5/7] detecting events + computing metrics...")
     events = detect_events(frames, fps, handedness)
+
+    # Apply CLI overrides on top of auto-detection. Any flag explicitly set
+    # overrides the detected value; unspecified flags leave auto-detect alone.
+    overrides = {
+        "plant_idx": args.plant,
+        "reach_back_idx": args.reach_back,
+        "power_pocket_idx": args.power_pocket,
+        "hit_idx": args.hit,
+        "release_idx": args.release,
+    }
+    applied = []
+    for attr, val in overrides.items():
+        if val is not None:
+            setattr(events, attr, int(val))
+            applied.append(f"{attr}={val}")
+    if applied:
+        print(f"      overrides applied: {', '.join(applied)}")
+        print(f"      events: plant@{events.plant_idx}  reach_back@{events.reach_back_idx}  "
+              f"power_pocket@{events.power_pocket_idx}  hit@{events.hit_idx}  release@{events.release_idx}")
+    else:
+        print(f"      events: plant@{events.plant_idx}  reach_back@{events.reach_back_idx}  "
+              f"power_pocket@{events.power_pocket_idx}  hit@{events.hit_idx}  release@{events.release_idx}  "
+              f"facing={events.facing_direction}")
+
     metrics = compute_metrics(frames, events, fps, h, cfg)
 
     if not args.no_annotate:
-        dst = ROOT / "annotated" / f"{clip.stem}.mp4"
+        dst = ROOT / "annotated" / f"{clip.stem}.pose.mp4"
         dst.parent.mkdir(exist_ok=True)
         print(f"[6/7] writing annotated video: {dst}")
         annotate_video(clip, dst, frames, events, fps)
@@ -740,10 +871,13 @@ def main() -> int:
     save_event_snapshots(clip, events, clip.stem)
 
     print("\n=== summary ===")
-    print(f"events: plant@{metrics.plant_t_ms}ms  reachback@{metrics.reach_back_t_ms}ms  "
-          f"hit@{metrics.hit_t_ms}ms  release@{metrics.release_t_ms}ms")
+    print(
+        f"tempo: reach_back->pp {metrics.reach_back_to_power_pocket_ms}ms  "
+        f"pp->hit {metrics.power_pocket_to_hit_ms}ms  "
+        f"reach_back->hit {metrics.reach_back_to_hit_ms}ms"
+    )
     print(f"flags: {', '.join(metrics.flags) or 'none'}")
-    print(f"\nmetrics/{clip.stem}.json and history.jsonl updated.")
+    print(f"\nmetrics/{clip.stem}.pose.json and history.jsonl updated.")
     return 0
 
 
