@@ -40,6 +40,10 @@ from scipy.signal import savgol_filter
 
 import mediapipe as mp
 
+# Local helper module. sys.path[0] is this script's directory when run
+# directly (python scripts/analyze_throw.py ...), so this import works.
+from _video_utils import ensure_browser_playable
+
 # ---------------------------------------------------------------------------
 # Paths & config
 # ---------------------------------------------------------------------------
@@ -798,6 +802,12 @@ def main() -> int:
     ap.add_argument("clip", type=Path, help="path to the video file in clips/")
     ap.add_argument("--notes", default="", help="optional session notes to log")
     ap.add_argument("--no-annotate", action="store_true", help="skip writing the annotated video (faster iteration)")
+    ap.add_argument(
+        "--no-transcode",
+        action="store_true",
+        help="skip the H.264 post-process step (the browser UI needs it, but "
+             "batch/CI runs may not)",
+    )
     # Event overrides — pin any event to a specific frame index, bypassing the
     # auto-detector for that event. Mirrors analyze_throw_cv.py's CLI so the
     # user's "ground-truth the frames" workflow is identical across pipelines.
@@ -863,6 +873,14 @@ def main() -> int:
         dst.parent.mkdir(exist_ok=True)
         print(f"[6/7] writing annotated video: {dst}")
         annotate_video(clip, dst, frames, events, fps)
+        if not args.no_transcode:
+            result = ensure_browser_playable(dst)
+            if result == "transcoded":
+                print("      post-processed to H.264 for browser playback")
+            elif result == "failed":
+                print("      [warn] ffmpeg transcode failed; video may not play in browser")
+            elif result == "skipped":
+                print("      [warn] ffmpeg not found; skipping H.264 transcode")
     else:
         print("[6/7] skipping annotation (--no-annotate)")
 

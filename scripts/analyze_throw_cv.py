@@ -38,6 +38,10 @@ import cv2
 import numpy as np
 import yaml
 
+# Local helper module. sys.path[0] is this script's directory when run
+# directly (python scripts/analyze_throw_cv.py ...), so this import works.
+from _video_utils import ensure_browser_playable
+
 
 # ---------------------------------------------------------------------------
 # Tiny scipy-free signal helpers (scipy isn't available in all sandboxes)
@@ -809,6 +813,12 @@ def main() -> int:
     ap.add_argument("clip", type=Path)
     ap.add_argument("--notes", default="")
     ap.add_argument("--no-annotate", action="store_true")
+    ap.add_argument(
+        "--no-transcode",
+        action="store_true",
+        help="skip the H.264 post-process step (the browser UI needs it, but "
+             "batch/CI runs may not)",
+    )
     # Event overrides — pin any event to a specific frame index, bypassing
     # the auto-detector for that event. Useful when the user ground-truths
     # events from the video after a pipeline misdetection.
@@ -870,6 +880,14 @@ def main() -> int:
         dst.parent.mkdir(exist_ok=True)
         print(f"[5/6] writing annotated video: {dst}")
         annotate_video(analysis_clip, dst, frames, events, fps)
+        if not args.no_transcode:
+            result = ensure_browser_playable(dst)
+            if result == "transcoded":
+                print("      post-processed to H.264 for browser playback")
+            elif result == "failed":
+                print("      [warn] ffmpeg transcode failed; video may not play in browser")
+            elif result == "skipped":
+                print("      [warn] ffmpeg not found; skipping H.264 transcode")
     else:
         print("[5/6] skipping annotation")
 
