@@ -1,0 +1,54 @@
+# Disc Golf Analyzer — player & pipeline configuration
+# Claude (or any coach) reads this on every session to calibrate feedback.
+# Copy to `config.yaml` and edit with your own profile.
+
+player:
+  name: YOUR_NAME
+  level: recreational          # brand_new | recreational | intermediate | advanced
+  typical_drive_ft: [250, 325] # current distance range in feet
+  goals:
+    - Consistency on fairway drives
+    - Unlocking distance toward 350+ ft
+  handedness: right            # right | left | auto
+  throw_style: backhand        # backhand | forehand | auto
+  known_issues:                # priority order — coach focuses here first
+    - rounding                 # see kb/rounding.md
+    - early_shoulders          # see kb/early_shoulders.md
+    - weak_plant               # see kb/plant_xstep.md
+    # Other recognized tags: shallow_reach_back, late_hit, poor_snap
+
+capture:
+  default_angle: side          # side | face_on | down_the_line | overhead | auto
+  device: iphone
+  typical_fps: [30, 60, 120, 240]
+
+pipeline:
+  # The active pipeline is analyze_throw_cv.py — silhouette + motion only
+  # (no joint-angle data). Settings below are for that pipeline.
+  motion:
+    # Rolling-minimum baseline window, in seconds. Shorter window = more
+    # responsive but noisier baseline.
+    baseline_window_s: 0.30
+    # Half-prominence spike width is bounded to ±N seconds around hit to
+    # avoid including preceding/following motion phases.
+    spike_width_bound_s: 0.75
+
+  stabilization:
+    # ORB-based camera-motion estimation kicks in when max pixel drift across
+    # the clip exceeds this threshold. Use higher values for shaky hand-held
+    # clips, lower for tripod shots.
+    max_drift_px: 50.0
+
+  # Thresholds used for event detection and flag generation.
+  # Calibrate as you collect more clips; these are reasonable starting defaults.
+  thresholds:
+    plant_ankle_px_stddev_flag: 6.0      # front ankle position stddev in the hit window
+    hit_to_baseline_ratio_min: 5.0       # a "real" hit spike should be this far above baseline
+    reach_back_to_hit_ms: [250, 400]     # elite tempo reference window
+    power_pocket_to_hit_ms: [150, 250]   # elite tempo reference window
+
+coaching:
+  # How Claude should tune tone and depth when reviewing.
+  tone: direct                 # direct | encouraging | clinical
+  focus_issues_per_session: 1  # don't overwhelm — pick top 1 (occasionally 2) fixes
+  always_reference_kb: true    # ground drills in cached sources when possible

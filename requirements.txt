@@ -1,0 +1,10 @@
+# Core pipeline (analyze_throw_cv.py, extract_keyframes.py)
+opencv-python>=4.9.0
+numpy>=1.26.0
+PyYAML>=6.0.1
+
+# Only required for the WIP pose pipeline (analyze_throw.py).
+# Safe to comment out if you only use the cv2 pipeline — MediaPipe installs can
+# be flaky on some platforms / networks.
+mediapipe>=0.10.14
+scipy>=1.12.0
