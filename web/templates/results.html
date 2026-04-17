@@ -34,6 +34,7 @@
   {% set rows = rows_by_pipeline[p] %}
   {% set keyframes = keyframes_by_pipeline[p] %}
   {% set video_file = clip_stem ~ ('.cv.mp4' if p == 'cv2' else '.pose.mp4') %}
+  {% set video_v = video_versions.get(p, 0) %}
 
   <div class="tab-panel {% if loop.first %}active{% endif %}" data-panel="{{ p }}">
     <div class="card">
@@ -48,9 +49,9 @@
         data-fps="{{ fps }}"
         data-pipeline="{{ p }}"
       >
-        <source src="{{ url_for('serve_annotated', filename=video_file) }}" type="video/mp4" />
+        <source src="{{ url_for('serve_annotated', filename=video_file) }}?v={{ video_v }}" type="video/mp4" />
         Your browser can't play this file. Open it directly at
-        <a href="{{ url_for('serve_annotated', filename=video_file) }}">{{ video_file }}</a>.
+        <a href="{{ url_for('serve_annotated', filename=video_file) }}?v={{ video_v }}">{{ video_file }}</a>.
       </video>
 
       {% set event_order = ['setup', 'plant', 'reach_back', 'power_pocket', 'hit', 'release'] %}
@@ -115,8 +116,8 @@
       <div class="keyframes">
         {% for kf in keyframes %}
         <figure style="margin: 0;">
-          <a href="{{ kf.src }}" target="_blank" rel="noopener">
-            <img src="{{ kf.src }}" alt="{{ kf.event }}" loading="lazy" />
+          <a href="{{ kf.src }}?v={{ kf.version }}" target="_blank" rel="noopener">
+            <img src="{{ kf.src }}?v={{ kf.version }}" alt="{{ kf.event }}" loading="lazy" />
           </a>
           <figcaption>{{ kf.event.replace('_', ' ') }}</figcaption>
         </figure>

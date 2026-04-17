@@ -751,6 +751,11 @@ def save_event_snapshots(src: Path, events: Events, stem: str) -> None:
     }
     out_dir = ROOT / "metrics" / f"{stem}.pose_frames"
     out_dir.mkdir(parents=True, exist_ok=True)
+    # Wipe prior *_frame_*.png so a re-run with corrected indices doesn't leave
+    # stale snapshots alongside the new ones (list_keyframes only shows one per
+    # event, and which one wins is filesystem-order-dependent).
+    for old in out_dir.glob("*_frame_*.png"):
+        old.unlink()
     cap = cv2.VideoCapture(str(src))
     try:
         for label, idx in event_frames.items():

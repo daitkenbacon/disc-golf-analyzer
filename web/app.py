@@ -13,6 +13,7 @@ The app holds no state itself. All persistent state lives on disk:
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -98,6 +99,7 @@ def create_app() -> Flask:
             keyframes_by_pipeline={
                 p: list_keyframes(clip_path.stem, p) for p in available
             },
+            video_versions=annotated_versions(clip_path.stem),
         )
 
     @app.get("/override/<path:clip>")
@@ -183,12 +185,20 @@ def create_app() -> Flask:
 
     @app.get("/annotated/<path:filename>")
     def serve_annotated(filename: str) -> Response:
-        return send_from_directory(ANNOTATED_DIR, filename)
+        resp = send_from_directory(ANNOTATED_DIR, filename)
+        # Annotated videos write to the same filename on every re-analyze. We
+        # cache-bust with ?v={mtime} in the template, but belt-and-suspenders:
+        # tell the browser to always revalidate so it doesn't serve stale
+        # bytes for the bare URL (e.g. when linking to the raw video).
+        resp.headers["Cache-Control"] = "no-cache, must-revalidate"
+        return resp
 
     @app.get("/metrics-file/<path:filename>")
     def serve_metrics_file(filename: str) -> Response:
         # /metrics is used by Flask conventions; namespace under /metrics-file.
-        return send_from_directory(METRICS_DIR, filename)
+        resp = send_from_directory(METRICS_DIR, filename)
+        resp.headers["Cache-Control"] = "no-cache, must-revalidate"
+        return resp
 
     return app
 
@@ -410,25 +420,71 @@ def metrics_rows(
     return rows
 
 
-def list_keyframes(stem: str, pipeline: str) -> list[dict[str, str]]:
-    """Return [{event, src}, ...] for the PNGs saved per event."""
+def list_keyframes(stem: str, pipeline: str) -> list[dict[str, Any]]:
+    """Return [{event, src, version}, ...] for the PNGs saved per event.
+
+    `version` is the file's mtime (as an int) — used as a cache-buster query
+    param in the template so a re-analyze (same URL, new content) defeats the
+    browser's HTTP cache. `src` is just the URL path without the query.
+
+    File-matching is anchored: `{event}_frame_<digits>.png` only. That way
+    future files with slightly different naming can't accidentally collide
+    (e.g. `plant` inside `power_pocket`), and if a stale snapshot somehow
+    survives the wipe in `save_event_snapshots`, the newest one (highest frame
+    index) wins deterministically.
+    """
     if pipeline == "cv2":
         frames_dir = METRICS_DIR / f"{stem}_frames"
     else:
         frames_dir = METRICS_DIR / f"{stem}.pose_frames"
     if not frames_dir.is_dir():
         return []
-    entries: list[dict[str, str]] = []
     order = ["setup", "plant", "reach_back", "power_pocket", "hit", "release"]
-    files = {p.stem: p for p in frames_dir.iterdir() if p.suffix.lower() == ".png"}
+    entries: list[dict[str, Any]] = []
+    pngs = [p for p in frames_dir.iterdir() if p.suffix.lower() == ".png"]
     for event in order:
-        # Match files like "hit.png", "hit_264.png", "03_hit.png", etc.
-        for stem_name, path in files.items():
-            if event in stem_name:
-                rel = path.relative_to(METRICS_DIR).as_posix()
-                entries.append({"event": event, "src": f"/metrics-file/{rel}"})
-                break
+        pattern = re.compile(rf"^{re.escape(event)}_frame_(\d+)$")
+        candidates: list[tuple[int, Path]] = []
+        for p in pngs:
+            m = pattern.match(p.stem)
+            if m:
+                candidates.append((int(m.group(1)), p))
+        if not candidates:
+            continue
+        # Newest frame index wins. If a prior run left a stale file behind,
+        # this is the tiebreaker that keeps the UI deterministic.
+        _, path = max(candidates, key=lambda t: t[0])
+        rel = path.relative_to(METRICS_DIR).as_posix()
+        try:
+            version = int(path.stat().st_mtime)
+        except OSError:
+            version = 0
+        entries.append(
+            {
+                "event": event,
+                "src": f"/metrics-file/{rel}",
+                "version": version,
+            }
+        )
     return entries
+
+
+def annotated_versions(stem: str) -> dict[str, int]:
+    """Return {pipeline: mtime_int} for the annotated videos that exist.
+
+    Used as a cache-buster for the `<source src>` URL in the results template
+    — when a re-analyze overwrites `annotated/<stem>.cv.mp4`, the mtime bumps
+    and the browser refetches instead of serving the stale cached response.
+    """
+    out: dict[str, int] = {}
+    for pipeline, suffix in (("cv2", ".cv.mp4"), ("pose", ".pose.mp4")):
+        path = ANNOTATED_DIR / f"{stem}{suffix}"
+        if path.exists():
+            try:
+                out[pipeline] = int(path.stat().st_mtime)
+            except OSError:
+                out[pipeline] = 0
+    return out
 
 
 def merge_config(updates: dict[str, Any]) -> dict[str, Any]:
